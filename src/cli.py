@@ -8,7 +8,9 @@ import pandas as pd
 
 from src.collectors.akshare_client import AkshareCollector
 from src.database.repository import MarketDataRepository
+from src.models.baseline import train_baseline_models
 from src.models.dataset import LABEL_COLUMNS
+from src.models.factor_analysis import analyze_factors
 from src.models.train_lgbm import train_lgbm_regressor
 from src.utils.config import load_yaml
 
@@ -204,6 +206,59 @@ def cmd_train_lgbm(args: argparse.Namespace) -> None:
     print(json.dumps(metrics, indent=2, ensure_ascii=False))
 
 
+def cmd_analyze_factors(args: argparse.Namespace) -> None:
+    context = build_context()
+    model_config = load_yaml(MODEL_CONFIG)
+    dataset_config = model_config.get("dataset", {})
+    factor_config = model_config.get("factor_analysis", {})
+    artifact_config = model_config.get("artifacts", {})
+    target = args.target or dataset_config.get("target", "future_return_5d")
+    validate_target(target)
+
+    dataset = context.repository.query_model_training_dataset(
+        adjust=args.adjust,
+        target=target,
+    )
+    if dataset.empty:
+        print("No training dataset found. Run build-training-dataset first.")
+        return
+
+    report = analyze_factors(
+        dataset=dataset,
+        target=target,
+        report_dir=artifact_config.get("report_dir", "artifacts/reports"),
+        quantiles=args.quantiles or int(factor_config.get("quantiles", 5)),
+        min_stocks_per_date=args.min_stocks_per_date or int(factor_config.get("min_stocks_per_date", 5)),
+    )
+    print(json.dumps(report, indent=2, ensure_ascii=False))
+
+
+def cmd_train_baseline(args: argparse.Namespace) -> None:
+    context = build_context()
+    model_config = load_yaml(MODEL_CONFIG)
+    dataset_config = model_config.get("dataset", {})
+    baseline_config = model_config.get("baseline", {})
+    artifact_config = model_config.get("artifacts", {})
+    target = args.target or dataset_config.get("target", "future_return_5d")
+    validate_target(target)
+
+    dataset = context.repository.query_model_training_dataset(
+        adjust=args.adjust,
+        target=target,
+    )
+    if dataset.empty:
+        print("No training dataset found. Run build-training-dataset first.")
+        return
+
+    metrics = train_baseline_models(
+        dataset=dataset,
+        target=target,
+        report_dir=artifact_config.get("report_dir", "artifacts/reports"),
+        ridge_alpha=args.ridge_alpha or float(baseline_config.get("ridge_alpha", 1.0)),
+    )
+    print(json.dumps(metrics, indent=2, ensure_ascii=False))
+
+
 def cmd_counts(_: argparse.Namespace) -> None:
     context = build_context()
     print(format_frame(context.repository.table_counts()))
@@ -330,6 +385,19 @@ def build_parser() -> argparse.ArgumentParser:
     train_lgbm.add_argument("--adjust", default="qfq", choices=["", "qfq", "hfq"], help="复权类型")
     train_lgbm.add_argument("--target", help="目标标签，例如 future_return_5d")
     train_lgbm.set_defaults(func=cmd_train_lgbm)
+
+    analyze_factors_parser = subparsers.add_parser("analyze-factors", help="分析因子 IC、Rank IC 和分层收益")
+    analyze_factors_parser.add_argument("--adjust", default="qfq", choices=["", "qfq", "hfq"], help="复权类型")
+    analyze_factors_parser.add_argument("--target", help="目标标签，例如 future_return_5d")
+    analyze_factors_parser.add_argument("--quantiles", type=int, help="分层数量")
+    analyze_factors_parser.add_argument("--min-stocks-per-date", type=int, help="每个交易日至少多少只股票才计算横截面 IC")
+    analyze_factors_parser.set_defaults(func=cmd_analyze_factors)
+
+    train_baseline = subparsers.add_parser("train-baseline", help="训练和比较简单 baseline 模型")
+    train_baseline.add_argument("--adjust", default="qfq", choices=["", "qfq", "hfq"], help="复权类型")
+    train_baseline.add_argument("--target", help="目标标签，例如 future_return_5d")
+    train_baseline.add_argument("--ridge-alpha", type=float, help="Ridge 正则强度")
+    train_baseline.set_defaults(func=cmd_train_baseline)
 
     query = subparsers.add_parser("query", help="查询某只股票日线")
     query.add_argument("--symbol", required=True, help="股票代码，例如 000001")

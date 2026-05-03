@@ -202,6 +202,64 @@ train 很好，valid/test 很差
 
 这通常叫过拟合。它说明模型记住了过去的小样本，但没有学到稳定的未来规律。后面要靠更多股票、更长时间、更好的因子、更严格回测来改善。
 
+## 因子分析与 Baseline
+
+在继续调复杂模型之前，先回答两个问题：
+
+```text
+因子本身有没有一点预测信息？
+简单模型能做到什么水平？
+```
+
+运行因子分析：
+
+```bash
+python -m src.cli analyze-factors
+```
+
+它会生成：
+
+```text
+artifacts/reports/factor_analysis_*_summary.csv
+artifacts/reports/factor_analysis_*_quantiles.csv
+artifacts/reports/factor_analysis_*.json
+```
+
+重点看这些字段：
+
+- `daily_rank_ic_mean`：每天横截面 Rank IC 的平均值，越远离 0 越可能有信号。
+- `daily_rank_ic_positive_rate`：Rank IC 为正的日期占比。
+- `daily_count`：有多少个交易日能计算这个因子。
+- `daily_coverage`：覆盖率。
+- `is_reliable`：覆盖日期太少的因子会被标成不可靠。
+
+IC 可以粗略理解为“因子排序”和“未来收益排序”的相关性。  
+如果某个因子 IC 很高但 `daily_count` 很小，通常不要急着相信它，它可能只是偶然好看。
+
+运行 baseline 对比：
+
+```bash
+python -m src.cli train-baseline
+```
+
+当前 baseline 包括：
+
+- `zero`：永远预测 0。
+- `train_mean`：永远预测训练集平均未来收益。
+- `momentum_5d`：直接用过去 5 日收益当预测。
+- `linear_regression`：线性回归。
+- `ridge`：带正则的线性回归。
+
+它会生成：
+
+```text
+artifacts/reports/baseline_*_metrics.json
+artifacts/reports/baseline_*_predictions.csv
+```
+
+baseline 的作用不是为了最终上线，而是给 LightGBM 一个参照。  
+如果 LightGBM 在测试集上还打不过简单 baseline，优先怀疑过拟合、样本太少、因子太弱，而不是继续盲目调复杂模型。
+
 ## 项目结构
 
 ```text
