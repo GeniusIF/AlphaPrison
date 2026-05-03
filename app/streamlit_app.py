@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 
@@ -12,6 +11,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.database.repository import MarketDataRepository
+from src.models.reports import list_json_reports, report_summary_tables
 from src.utils.config import load_yaml
 
 
@@ -118,19 +118,55 @@ with tab_model:
     st.metric("训练样本数", int(training_rows.iloc[0]) if not training_rows.empty else 0)
 
     report_dir = ROOT / "artifacts" / "reports"
-    metrics_files = sorted(report_dir.glob("*_metrics.json"))
-    if not metrics_files:
+    reports = list_json_reports(report_dir)
+    if not reports:
         st.info("还没有模型报告。先运行：python -m src.cli train-lgbm")
     else:
-        latest_metrics = metrics_files[-1]
-        metrics = json.loads(latest_metrics.read_text(encoding="utf-8"))
-        st.caption(latest_metrics.name)
+        options = [f"{report['type']} · {report['name']}" for report in reports]
+        selected_index = st.selectbox("报告", range(len(options)), format_func=lambda index: options[index])
+        report = reports[selected_index]
+        payload = report["payload"]
+        tables = report_summary_tables(report)
+        st.caption(str(report["path"]))
 
-        cols = st.columns(3)
-        for col, split in zip(cols, ["train", "valid", "test"]):
-            score = metrics["scores"][split]
-            col.metric(f"{split} RMSE", f"{score['rmse']:.4f}")
-            col.metric(f"{split} 方向准确率", f"{score['directional_accuracy']:.2%}")
+        if report["type"] == "lgbm":
+            st.subheader("LightGBM 单次切分")
+            scores = payload.get("scores", {})
+            cols = st.columns(3)
+            for col, split in zip(cols, ["train", "valid", "test"]):
+                score = scores.get(split, {})
+                col.metric(f"{split} RMSE", f"{score.get('rmse', 0):.4f}")
+                col.metric(f"{split} 方向准确率", f"{score.get('directional_accuracy', 0):.2%}")
+        elif report["type"] == "baseline":
+            st.subheader("Baseline 测试集对比")
+            st.dataframe(tables.get("test_scores"), use_container_width=True, hide_index=True)
+        elif report["type"] == "rolling_lgbm":
+            st.subheader("LightGBM 滚动验证")
+            aggregate = payload.get("aggregate_scores", {})
+            cols = st.columns(3)
+            cols[0].metric("整体 RMSE", f"{aggregate.get('rmse', 0):.4f}")
+            cols[1].metric("整体方向准确率", f"{aggregate.get('directional_accuracy', 0):.2%}")
+            cols[2].metric("折数", len(payload.get("folds", [])))
+            st.dataframe(tables.get("folds"), use_container_width=True, hide_index=True)
+        elif report["type"] == "factor_analysis":
+            st.subheader("因子 Rank IC")
+            top_rank_ic = tables.get("top_rank_ic")
+            display_columns = [
+                "feature",
+                "daily_rank_ic_mean",
+                "daily_rank_ic_positive_rate",
+                "daily_count",
+                "daily_coverage",
+                "is_reliable",
+            ]
+            if top_rank_ic is not None and not top_rank_ic.empty:
+                st.dataframe(
+                    top_rank_ic[[column for column in display_columns if column in top_rank_ic.columns]],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+        else:
+            st.warning("暂不认识这种报告结构，下面展示原始 JSON。")
 
-        st.subheader("完整指标")
-        st.json(metrics)
+        st.subheader("完整报告")
+        st.json(payload)

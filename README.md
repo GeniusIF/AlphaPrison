@@ -1,286 +1,271 @@
 # 赚钱的牢A
 
-个人 A 股 AI 投研台。当前版本先完成最小可用的数据工程底座：
+个人 A 股 AI 投研台。目标是把 A 股数据采集、特征工程、模型训练、因子分析、滚动验证、回测和持仓看板逐步做成一个本地可运行的研究系统。
 
-- 从 AKShare 采集 A 股日线数据
-- 将股票基础信息和日线行情写入 DuckDB
-- 通过 CLI 查询本地数据
-- 提供一个 Streamlit 看板入口
+> 本项目仅用于个人学习、研究和交易决策辅助，不构成投资建议，也不应直接用于自动下单。
 
-> 说明：本项目用于个人研究和交易决策辅助，不构成投资建议，也不应直接用于自动下单。
+## 当前状态
 
-## 快速开始
+已经完成：
+
+- AKShare A 股股票池、日线行情、交易日历、停复牌公告采集。
+- DuckDB 本地入库和查询。
+- 涨跌停标记、停牌/缺失推导。
+- 基础技术因子和训练标签。
+- 模型训练表 `model_training_dataset`。
+- LightGBM 回归模型，默认预测 `future_return_5d`。
+- 因子 IC / Rank IC / 分层收益分析。
+- baseline 模型对比。
+- LightGBM 滚动验证。
+- Streamlit 本地看板和报告查看入口。
+
+当前研究结论要保守：扩到 100 支股票后，LightGBM 在滚动验证里的方向准确率大约仍在 50% 附近，说明当前技术因子还没有形成稳定预测力。下一步不建议直接美化收益曲线，而是先做真实化回测框架和更强的数据/因子。
+
+## 安装
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+```
 
+默认数据库：
+
+```text
+data/duckdb/a_stock.duckdb
+```
+
+默认配置：
+
+```text
+config/data_source.yaml
+config/model.yaml
+config/trading_cost.yaml
+```
+
+本地数据库、模型文件、报告、虚拟环境都不会提交到 GitHub。
+
+## 最短流程
+
+调试 10 支股票：
+
+```bash
 python -m src.cli init-db
-python -m src.cli collect --start-date 20240101 --end-date 20260503 --limit 10
+python -m src.cli collect --pool-source config --limit 10 --start-date 20240101 --end-date 20260504
 python -m src.cli collect-calendar --start-date 20240101 --end-date 20260504
 python -m src.cli build-dataset
-python -m src.cli query --symbol 000001 --tail 5
+python -m src.cli build-training-dataset
+python -m src.cli analyze-factors
+python -m src.cli train-baseline
+python -m src.cli train-lgbm
+python -m src.cli rolling-validate-lgbm
+```
+
+扩到 100 支股票：
+
+```bash
+python -m src.cli collect-stock-pool --limit 100
+python -m src.cli collect --pool-source db --limit 100 --start-date 20240101 --end-date 20260504
+python -m src.cli collect-calendar --start-date 20240101 --end-date 20260504
+python -m src.cli build-dataset
+python -m src.cli build-training-dataset
+python -m src.cli analyze-factors
+python -m src.cli train-baseline
+python -m src.cli train-lgbm
+python -m src.cli rolling-validate-lgbm
+```
+
+`collect-stock-pool` 默认保留常见 A 股代码段，并排除 ST / *ST 股票。ST 股票涨跌停规则不同，早期研究阶段先避开更清爽。
+
+## 看板
+
+启动本地 UI：
+
+```bash
 streamlit run app/streamlit_app.py
 ```
 
-默认数据库路径是 `data/duckdb/a_stock.duckdb`，默认调试股票池在 `config/data_source.yaml`。
+浏览器打开：
+
+```text
+http://127.0.0.1:8501
+```
+
+看板页签：
+
+- `市场数据`：核心表行数和最新行情。
+- `股票详情`：单票 K 线和原始日线。
+- `训练集`：技术因子和训练标签样例。
+- `模型训练`：查看 LightGBM、baseline、滚动验证、因子分析报告。
+
+## 报告
+
+训练和分析报告会保存在：
+
+```text
+artifacts/reports/
+```
+
+模型文件会保存在：
+
+```text
+artifacts/models/
+```
+
+终端查看报告摘要：
+
+```bash
+python -m src.cli report-summary
+python -m src.cli report-summary --type factor_analysis --limit 1
+python -m src.cli report-summary --type baseline --limit 1
+python -m src.cli report-summary --type lgbm --limit 1
+python -m src.cli report-summary --type rolling_lgbm --limit 1
+```
+
+报告类型：
+
+- `factor_analysis`：因子 IC、Rank IC 和分层收益。
+- `baseline`：零预测、均值预测、动量、线性回归、Ridge。
+- `lgbm`：单次 train/valid/test 切分训练。
+- `rolling_lgbm`：滚动时间窗口验证。
+
+重点看：
+
+- `directional_accuracy`：方向准确率。
+- `rmse`：预测误差。
+- `r2`：相对均值预测的解释能力。
+- `daily_rank_ic_mean`：因子横截面排序和未来收益排序的平均相关性。
+- `daily_count` / `daily_coverage`：因子统计覆盖是否足够。
+
+如果训练集很好，但 valid/test 或 rolling 很差，通常说明模型过拟合。此时应优先扩大样本、改善因子、降低复杂度，而不是继续调参。
 
 ## 常用命令
 
-初始化数据库：
-
-```bash
-python -m src.cli init-db
-```
-
-采集默认 10 支股票的前复权日线：
-
-```bash
-python -m src.cli collect --start-date 20240101 --end-date 20260503 --adjust qfq
-```
-
-查询某只股票最近 10 条：
-
-```bash
-python -m src.cli query --symbol 600519 --tail 10
-```
-
-列出本地股票：
-
-```bash
-python -m src.cli list-stocks
-```
-
-查看核心表行数：
+数据查看：
 
 ```bash
 python -m src.cli counts
+python -m src.cli list-stocks
+python -m src.cli latest
+python -m src.cli query --symbol 600519 --tail 10
 ```
 
-## 数据集生成
-
-训练模型不能直接拿原始 K 线就开跑。这个项目会先把原始行情加工成几类更适合回测和训练的数据。
-
-采集交易日历：
-
-```bash
-python -m src.cli collect-calendar --start-date 20240101 --end-date 20260504
-```
-
-交易日历回答的是：“A 股哪些日期开市？”  
-它后面会用于判断某只股票在交易日没有行情时，是不是可能停牌或数据缺失。
-
-采集东方财富停复牌公告：
-
-```bash
-python -m src.cli collect-suspensions --start-date 2026-04-01 --end-date 2026-05-04 --limit 10
-```
-
-这个接口按日期查询，跑很长时间范围会发很多请求。调试阶段建议先查最近一小段。
-
-根据交易日和日线行情推导停牌/缺失：
-
-```bash
-python -m src.cli derive-suspensions
-```
-
-逻辑是：如果某天是交易日，但某只股票没有日线行情，就记一条 `derived_missing_daily_price`。  
-注意：这只是工程上的推导，真实生产里还要结合交易所公告和数据源校验。
-
-生成涨跌停标记：
-
-```bash
-python -m src.cli build-limit-status
-```
-
-当前 MVP 用日线 `pct_change` 推导涨跌停，例如普通 A 股约 `+9.8%/-9.8%`，创业板/科创板约 `+19.8%/-19.8%`。  
-这足够支持第一版回测约束，但不是交易所级别的精确涨跌停价计算。
-
-生成基础技术因子：
-
-```bash
-python -m src.cli build-features
-```
-
-目前会生成：
-
-- `return_1d`、`return_5d`、`return_20d`
-- `ma_5`、`ma_10`、`ma_20`、`ma_60`
-- `ma_5_ratio`、`ma_20_ratio`
-- `volatility_5`、`volatility_20`
-- `volume_ma_5`、`volume_ma_20`、`volume_ratio_5`
-- `rsi_14`
-- `macd`、`macd_signal`、`macd_hist`
-
-生成训练标签：
-
-```bash
-python -m src.cli build-labels
-```
-
-目前会生成：
-
-- `future_return_1d`
-- `future_return_5d`
-- `future_return_20d`
-- `future_max_drawdown_5d`
-- `future_max_drawdown_20d`
-- `label_up_5d`
-- `label_up_20d`
-
-一键生成涨跌停、推导停牌、技术因子和训练标签：
-
-```bash
-python -m src.cli build-dataset
-```
-
-查看某只股票的特征和标签：
+特征和标签：
 
 ```bash
 python -m src.cli query-features --symbol 600519 --tail 5
 python -m src.cli query-labels --symbol 600519 --tail 5
+python -m src.cli query-training-dataset --target future_return_5d --tail 5
 ```
 
-这里有个重要概念：`features` 是模型在当下能看到的信息，`labels` 是未来才知道的答案。训练时要用历史样本让模型学习“当时的特征”和“后来发生了什么”之间的关系，绝不能把未来信息混进特征里。
-
-## LightGBM 训练
-
-训练前先把特征和标签合并成 `model_training_dataset`：
+单独构建数据集：
 
 ```bash
+python -m src.cli build-limit-status
+python -m src.cli derive-suspensions
+python -m src.cli build-features
+python -m src.cli build-labels
+python -m src.cli build-dataset
 python -m src.cli build-training-dataset
 ```
 
-这一步会按下面的键合并：
-
-```text
-symbol + trade_date + adjust
-```
-
-并按时间顺序切成三段：
-
-- `train`：较早的 70% 日期
-- `valid`：中间的 15% 日期
-- `test`：最后的 15% 日期
-
-注意这里不是随机切分。股票模型必须尽量模拟真实场景：只能用过去训练，然后看未来表现。
-
-查看训练表：
-
-```bash
-python -m src.cli query-training-dataset --target future_return_5d --tail 5
-python -m src.cli query-training-dataset --split test --target future_return_5d --tail 5
-```
-
-训练 LightGBM：
-
-```bash
-python -m src.cli train-lgbm
-```
-
-默认目标是 `future_return_5d`，也就是预测未来 5 个交易日收益率。配置在：
-
-```text
-config/model.yaml
-```
-
-训练完成后会在本地生成：
-
-```text
-artifacts/models/   模型文件
-artifacts/reports/  指标、预测结果、特征重要性
-```
-
-这些是运行产物，默认不会提交到 GitHub。
-
-第一次模型结果不要只看训练集。如果出现：
-
-```text
-train 很好，valid/test 很差
-```
-
-这通常叫过拟合。它说明模型记住了过去的小样本，但没有学到稳定的未来规律。后面要靠更多股票、更长时间、更好的因子、更严格回测来改善。
-
-## 因子分析与 Baseline
-
-在继续调复杂模型之前，先回答两个问题：
-
-```text
-因子本身有没有一点预测信息？
-简单模型能做到什么水平？
-```
-
-运行因子分析：
+模型研究：
 
 ```bash
 python -m src.cli analyze-factors
-```
-
-它会生成：
-
-```text
-artifacts/reports/factor_analysis_*_summary.csv
-artifacts/reports/factor_analysis_*_quantiles.csv
-artifacts/reports/factor_analysis_*.json
-```
-
-重点看这些字段：
-
-- `daily_rank_ic_mean`：每天横截面 Rank IC 的平均值，越远离 0 越可能有信号。
-- `daily_rank_ic_positive_rate`：Rank IC 为正的日期占比。
-- `daily_count`：有多少个交易日能计算这个因子。
-- `daily_coverage`：覆盖率。
-- `is_reliable`：覆盖日期太少的因子会被标成不可靠。
-
-IC 可以粗略理解为“因子排序”和“未来收益排序”的相关性。  
-如果某个因子 IC 很高但 `daily_count` 很小，通常不要急着相信它，它可能只是偶然好看。
-
-运行 baseline 对比：
-
-```bash
 python -m src.cli train-baseline
+python -m src.cli train-lgbm
+python -m src.cli rolling-validate-lgbm
 ```
 
-当前 baseline 包括：
+## 数据表
 
-- `zero`：永远预测 0。
-- `train_mean`：永远预测训练集平均未来收益。
-- `momentum_5d`：直接用过去 5 日收益当预测。
-- `linear_regression`：线性回归。
-- `ridge`：带正则的线性回归。
+核心表：
 
-它会生成：
+- `stock_basic`：股票基础信息。
+- `daily_price`：日线行情。
+- `trade_calendar`：交易日历。
+- `stock_suspension`：停牌/缺失信息。
+- `daily_limit_status`：涨跌停标记。
+- `technical_features`：技术因子。
+- `training_labels`：未来收益和风险标签。
+- `model_training_dataset`：模型训练表。
+
+## 重要概念
+
+`features` 是模型在当下能看到的信息。  
+`labels` 是未来才知道的答案。
+
+训练时要用历史样本学习：
 
 ```text
-artifacts/reports/baseline_*_metrics.json
-artifacts/reports/baseline_*_predictions.csv
+当时的特征 -> 后来发生了什么
 ```
 
-baseline 的作用不是为了最终上线，而是给 LightGBM 一个参照。  
-如果 LightGBM 在测试集上还打不过简单 baseline，优先怀疑过拟合、样本太少、因子太弱，而不是继续盲目调复杂模型。
+不能把未来信息混进特征里，否则会出现“回测很好，实盘失效”的未来函数问题。
+
+模型当前默认预测：
+
+```text
+future_return_5d
+```
+
+也就是未来 5 个交易日收益率。模型输出不是买卖建议，只是研究信号。后续需要通过回测、交易成本、仓位和风控规则把预测转成可执行策略。
 
 ## 项目结构
 
 ```text
 app/                     Streamlit UI
-config/                  数据源、数据库、交易成本等配置
+config/                  数据源、模型、交易成本配置
 data/duckdb/             DuckDB 本地数据库
-src/collectors/          数据采集器
-src/database/            Schema 与查询/入库 Repository
-src/features/            特征工程，后续扩展
-src/models/              模型训练，后续扩展
-src/backtest/            回测模块，后续扩展
-src/portfolio/           持仓管理，后续扩展
+artifacts/models/        本地模型文件
+artifacts/reports/       本地研究报告
+src/collectors/          数据采集和股票池
+src/database/            Schema、入库、查询
+src/features/            技术因子和训练标签
+src/models/              数据集、模型、因子分析、报告
+src/backtest/            回测模块，待实现
+src/portfolio/           持仓管理，待实现
 tests/                   单元测试
 ```
 
+## 已完成
+
+1. **数据底座**
+   AKShare 采集、DuckDB 入库、CLI 查询、Streamlit 数据看板。
+
+2. **市场约束数据**
+   交易日历、停复牌公告、停牌/缺失推导、涨跌停标记。
+
+3. **训练数据**
+   技术因子、未来收益标签、未来回撤标签、模型训练表。
+
+4. **模型研究**
+   LightGBM、baseline、因子分析、滚动验证、报告查看。
+
+5. **工程化**
+   配置文件、测试、GitHub 备份、运行产物忽略规则。
+
 ## 下一步
 
-建议按这个顺序继续：
+建议接下来按这个顺序做：
 
-1. 加入交易日历、停复牌、涨跌停数据。
-2. 做 LightGBM 滚动验证和预测信号表。
-3. 做真实化回测，包括费用、滑点、T+1、涨跌停不能成交。
-4. 接入公告/新闻的大模型事件分析信号。
-5. 接入手动持仓和组合风险看板。
+1. **真实化回测引擎**
+   用模型预测值生成每周调仓 Top N 策略，加入手续费、印花税、滑点、T+1、涨跌停不能成交、停牌不能成交、单票仓位上限。
+
+2. **预测信号表**
+   新增 `model_signal`，保存每次模型对股票的预测分数、排名、建议动作和解释字段，供 UI 和回测共用。
+
+3. **更强因子**
+   加入估值、市值、换手率、行业、指数状态、市场宽度等数据。当前纯技术因子偏弱。
+
+4. **滚动训练与预测流水线**
+   每个滚动窗口训练模型，并只对未来窗口预测，避免未来函数。
+
+5. **持仓管理**
+   手动录入持仓，展示组合仓位、浮盈浮亏、行业集中度、模型信号冲突和止损/止盈提醒。
+
+6. **大模型事件分析**
+   接公告/新闻，提取事件类型、情绪、风险和摘要，作为事件因子加入模型与 UI 解释。
+
+下一步最推荐先做 **真实化回测引擎 + model_signal 表**。这会让系统从“模型研究”进入“策略验证”。

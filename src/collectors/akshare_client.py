@@ -6,6 +6,7 @@ from typing import Iterable
 
 import pandas as pd
 
+from src.collectors.stock_pool import clean_stock_name, normalize_stock_pool_frame
 from src.utils.stocks import infer_exchange, normalize_symbol, to_ts_code
 
 
@@ -73,6 +74,12 @@ class AkshareCollector:
         if not rows:
             return fallback
         return pd.DataFrame(rows)
+
+    def fetch_a_stock_pool(self, limit: int | None = None) -> pd.DataFrame:
+        ak = self._akshare()
+        source_frame = ak.stock_info_a_code_name()
+        time.sleep(self.request_interval_seconds)
+        return normalize_stock_pool_frame(source_frame, limit=limit)
 
     def fetch_daily_price(
         self,
@@ -196,10 +203,6 @@ def normalize_daily_price_frame(frame: pd.DataFrame, symbol: str, adjust: str) -
     return data[columns].sort_values("trade_date").reset_index(drop=True)
 
 
-def clean_stock_name(name: object) -> str:
-    if name is None:
-        return ""
-    return "".join(str(name).split())
 
 
 def normalize_trade_calendar_frame(

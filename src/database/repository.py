@@ -260,6 +260,28 @@ class MarketDataRepository:
                 """
             ).fetchdf()
 
+    def get_stock_pool(self, limit: int | None = None, source: str | None = None) -> list[dict[str, str]]:
+        if not self.db_path.exists():
+            self.init_schema()
+        filters = ["list_status = 'L'"]
+        params: list[object] = []
+        if source:
+            filters.append("source = ?")
+            params.append(source)
+        limit_sql = f"LIMIT {int(limit)}" if limit else ""
+        with self.connect(read_only=True) as conn:
+            frame = conn.execute(
+                f"""
+                SELECT symbol, name
+                FROM stock_basic
+                WHERE {' AND '.join(filters)}
+                ORDER BY symbol
+                {limit_sql}
+                """,
+                params,
+            ).fetchdf()
+        return [{"symbol": str(row.symbol), "name": str(row.name or "")} for row in frame.itertuples(index=False)]
+
     def query_daily_prices(
         self,
         symbol: str,
@@ -468,7 +490,13 @@ class MarketDataRepository:
                     'No daily price on open trade date' AS reason,
                     'derived_missing_daily_price' AS source,
                     CURRENT_TIMESTAMP AS updated_at
-                FROM stock_basic sb
+                FROM (
+                    SELECT DISTINCT sb.symbol, sb.ts_code
+                    FROM stock_basic sb
+                    INNER JOIN daily_price existing
+                        ON existing.symbol = sb.symbol
+                       AND existing.adjust = ?
+                ) sb
                 CROSS JOIN trade_calendar tc
                 LEFT JOIN daily_price dp
                     ON dp.symbol = sb.symbol
@@ -478,7 +506,7 @@ class MarketDataRepository:
                   AND dp.symbol IS NULL
                 ORDER BY sb.symbol, tc.trade_date
                 """,
-                [adjust],
+                [adjust, adjust],
             ).fetchdf()
 
     def build_daily_limit_status(self, adjust: str = "qfq") -> pd.DataFrame:

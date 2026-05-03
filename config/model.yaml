@@ -24,6 +24,12 @@ factor_analysis:
 baseline:
   ridge_alpha: 1.0
 
+rolling_validation:
+  train_window: 252
+  test_window: 63
+  step: 63
+  min_train_rows: 200
+
 artifacts:
   model_dir: artifacts/models
   report_dir: artifacts/reports

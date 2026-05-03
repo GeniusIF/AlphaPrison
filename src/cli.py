@@ -11,6 +11,8 @@ from src.database.repository import MarketDataRepository
 from src.models.baseline import train_baseline_models
 from src.models.dataset import LABEL_COLUMNS
 from src.models.factor_analysis import analyze_factors
+from src.models.reports import list_json_reports, report_summary_tables
+from src.models.rolling_validation import rolling_validate_lgbm
 from src.models.train_lgbm import train_lgbm_regressor
 from src.utils.config import load_yaml
 
@@ -53,7 +55,7 @@ def cmd_init_db(_: argparse.Namespace) -> None:
 def cmd_collect(args: argparse.Namespace) -> None:
     context = build_context()
     ak_config = context.config.get("akshare", {})
-    pool = select_pool(context.config, args.limit)
+    pool = select_collection_pool(context, source=args.pool_source, limit=args.limit)
     start_date = args.start_date or ak_config.get("default_start_date")
     end_date = args.end_date or ak_config.get("default_end_date")
     adjust = args.adjust or ak_config.get("default_adjust", "qfq")
@@ -80,6 +82,15 @@ def cmd_collect(args: argparse.Namespace) -> None:
         print("Failures:")
         for symbol, error in failures:
             print(f"- {symbol}: {error}")
+
+
+def cmd_collect_stock_pool(args: argparse.Namespace) -> None:
+    context = build_context()
+    stock_pool = context.collector.fetch_a_stock_pool(limit=args.limit)
+    row_count = context.repository.upsert_stock_basic(stock_pool)
+    print(f"Upserted {row_count} stock_basic rows from AKShare pool")
+    if args.show:
+        print(format_frame(stock_pool.head(args.show)))
 
 
 def cmd_collect_calendar(args: argparse.Namespace) -> None:
@@ -206,6 +217,33 @@ def cmd_train_lgbm(args: argparse.Namespace) -> None:
     print(json.dumps(metrics, indent=2, ensure_ascii=False))
 
 
+def cmd_rolling_validate_lgbm(args: argparse.Namespace) -> None:
+    context = build_context()
+    model_config = load_yaml(MODEL_CONFIG)
+    dataset_config = model_config.get("dataset", {})
+    rolling_config = model_config.get("rolling_validation", {})
+    artifact_config = model_config.get("artifacts", {})
+    target = args.target or dataset_config.get("target", "future_return_5d")
+    validate_target(target)
+
+    dataset = context.repository.query_model_training_dataset(adjust=args.adjust, target=target)
+    if dataset.empty:
+        print("No training dataset found. Run build-training-dataset first.")
+        return
+
+    report = rolling_validate_lgbm(
+        dataset=dataset,
+        target=target,
+        model_config=model_config.get("lightgbm", {}),
+        report_dir=artifact_config.get("report_dir", "artifacts/reports"),
+        train_window=args.train_window or int(rolling_config.get("train_window", 252)),
+        test_window=args.test_window or int(rolling_config.get("test_window", 63)),
+        step=args.step or int(rolling_config.get("step", 63)),
+        min_train_rows=args.min_train_rows or int(rolling_config.get("min_train_rows", 200)),
+    )
+    print(json.dumps(report, indent=2, ensure_ascii=False))
+
+
 def cmd_analyze_factors(args: argparse.Namespace) -> None:
     context = build_context()
     model_config = load_yaml(MODEL_CONFIG)
@@ -318,6 +356,38 @@ def cmd_query_training_dataset(args: argparse.Namespace) -> None:
     print(format_frame(frame))
 
 
+def cmd_report_summary(args: argparse.Namespace) -> None:
+    model_config = load_yaml(MODEL_CONFIG)
+    artifact_config = model_config.get("artifacts", {})
+    reports = list_json_reports(artifact_config.get("report_dir", "artifacts/reports"))
+    if args.type:
+        reports = [report for report in reports if report["type"] == args.type]
+    if not reports:
+        print("No reports found.")
+        return
+
+    selected_reports = reports[: args.limit]
+    for report in selected_reports:
+        print(f"\n[{report['type']}] {report['name']}")
+        print(f"path: {report['path']}")
+        tables = report_summary_tables(report)
+        if not tables:
+            print(json.dumps(report["payload"], indent=2, ensure_ascii=False))
+            continue
+        for title, table in tables.items():
+            print(f"\n{title}:")
+            print(format_frame(table))
+
+
+def select_collection_pool(context: AppContext, source: str, limit: int | None) -> list[dict[str, str]]:
+    if source == "config":
+        return select_pool(context.config, limit)
+    pool = context.repository.get_stock_pool(limit=limit)
+    if not pool:
+        raise ValueError("No stock_basic rows found. Run collect-stock-pool first or use --pool-source config.")
+    return pool
+
+
 def validate_target(target: str) -> None:
     if target not in LABEL_COLUMNS:
         raise ValueError(f"Unsupported target: {target}. Choose one of: {', '.join(LABEL_COLUMNS)}")
@@ -341,7 +411,13 @@ def build_parser() -> argparse.ArgumentParser:
     collect.add_argument("--end-date", help="结束日期，格式 YYYYMMDD")
     collect.add_argument("--adjust", default="qfq", choices=["", "qfq", "hfq"], help="复权类型")
     collect.add_argument("--limit", type=int, default=10, help="调试股票数量")
+    collect.add_argument("--pool-source", default="config", choices=["config", "db"], help="股票池来源")
     collect.set_defaults(func=cmd_collect)
+
+    collect_stock_pool = subparsers.add_parser("collect-stock-pool", help="从 AKShare 获取 A 股股票池并写入 stock_basic")
+    collect_stock_pool.add_argument("--limit", type=int, default=100, help="股票池数量")
+    collect_stock_pool.add_argument("--show", type=int, default=10, help="显示前 N 行")
+    collect_stock_pool.set_defaults(func=cmd_collect_stock_pool)
 
     collect_calendar = subparsers.add_parser("collect-calendar", help="采集交易日历并入库")
     collect_calendar.add_argument("--start-date", help="开始日期，格式 YYYYMMDD")
@@ -385,6 +461,15 @@ def build_parser() -> argparse.ArgumentParser:
     train_lgbm.add_argument("--adjust", default="qfq", choices=["", "qfq", "hfq"], help="复权类型")
     train_lgbm.add_argument("--target", help="目标标签，例如 future_return_5d")
     train_lgbm.set_defaults(func=cmd_train_lgbm)
+
+    rolling_lgbm = subparsers.add_parser("rolling-validate-lgbm", help="LightGBM 滚动时间窗口验证")
+    rolling_lgbm.add_argument("--adjust", default="qfq", choices=["", "qfq", "hfq"], help="复权类型")
+    rolling_lgbm.add_argument("--target", help="目标标签，例如 future_return_5d")
+    rolling_lgbm.add_argument("--train-window", type=int, help="训练窗口交易日数量")
+    rolling_lgbm.add_argument("--test-window", type=int, help="测试窗口交易日数量")
+    rolling_lgbm.add_argument("--step", type=int, help="滚动步长交易日数量")
+    rolling_lgbm.add_argument("--min-train-rows", type=int, help="每折最少训练样本数")
+    rolling_lgbm.set_defaults(func=cmd_rolling_validate_lgbm)
 
     analyze_factors_parser = subparsers.add_parser("analyze-factors", help="分析因子 IC、Rank IC 和分层收益")
     analyze_factors_parser.add_argument("--adjust", default="qfq", choices=["", "qfq", "hfq"], help="复权类型")
@@ -432,6 +517,11 @@ def build_parser() -> argparse.ArgumentParser:
     query_training_dataset.add_argument("--split", choices=["train", "valid", "test"], help="只查看某个时间切分")
     query_training_dataset.add_argument("--tail", type=int, help="只显示最后 N 行")
     query_training_dataset.set_defaults(func=cmd_query_training_dataset)
+
+    report_summary = subparsers.add_parser("report-summary", help="查看本地 artifacts/reports 里的报告摘要")
+    report_summary.add_argument("--type", choices=["lgbm", "baseline", "rolling_lgbm", "factor_analysis", "unknown"], help="只查看某类报告")
+    report_summary.add_argument("--limit", type=int, default=3, help="显示最近 N 个报告")
+    report_summary.set_defaults(func=cmd_report_summary)
 
     counts = subparsers.add_parser("counts", help="查看核心数据表行数")
     counts.set_defaults(func=cmd_counts)
