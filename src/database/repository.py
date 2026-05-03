@@ -8,6 +8,7 @@ import pandas as pd
 from src.database.schema import SCHEMA_SQL
 from src.features.labels import build_training_labels
 from src.features.technical import build_technical_features
+from src.models.dataset import build_model_training_dataset
 from src.utils.config import project_path
 from src.utils.stocks import normalize_symbol
 
@@ -220,6 +221,33 @@ class MarketDataRepository:
             conn.unregister("training_labels_frame")
         return len(frame)
 
+    def upsert_model_training_dataset(self, dataset: pd.DataFrame) -> int:
+        if dataset.empty:
+            return 0
+        self.init_schema()
+        frame = dataset.copy()
+        frame["symbol"] = frame["symbol"].map(normalize_symbol)
+        frame["trade_date"] = pd.to_datetime(frame["trade_date"]).dt.date
+        with self.connect() as conn:
+            conn.register("model_training_dataset_frame", frame)
+            conn.execute(
+                """
+                DELETE FROM model_training_dataset
+                USING model_training_dataset_frame
+                WHERE model_training_dataset.symbol = model_training_dataset_frame.symbol
+                  AND model_training_dataset.trade_date = model_training_dataset_frame.trade_date
+                  AND model_training_dataset.adjust = model_training_dataset_frame.adjust
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO model_training_dataset
+                SELECT * FROM model_training_dataset_frame
+                """
+            )
+            conn.unregister("model_training_dataset_frame")
+        return len(frame)
+
     def list_stocks(self) -> pd.DataFrame:
         if not self.db_path.exists():
             self.init_schema()
@@ -368,6 +396,64 @@ class MarketDataRepository:
                 params,
             ).fetchdf()
 
+    def query_daily_limit_status(self, adjust: str = "qfq") -> pd.DataFrame:
+        if not self.db_path.exists():
+            self.init_schema()
+        with self.connect(read_only=True) as conn:
+            return conn.execute(
+                """
+                SELECT dls.*
+                FROM daily_limit_status dls
+                INNER JOIN daily_price dp
+                    ON dp.symbol = dls.symbol
+                   AND dp.trade_date = dls.trade_date
+                WHERE dp.adjust = ?
+                ORDER BY dls.symbol, dls.trade_date
+                """,
+                [adjust],
+            ).fetchdf()
+
+    def query_stock_suspensions(self) -> pd.DataFrame:
+        if not self.db_path.exists():
+            self.init_schema()
+        with self.connect(read_only=True) as conn:
+            return conn.execute(
+                """
+                SELECT *
+                FROM stock_suspension
+                ORDER BY symbol, trade_date
+                """
+            ).fetchdf()
+
+    def query_model_training_dataset(
+        self,
+        adjust: str = "qfq",
+        target: str | None = None,
+        split: str | None = None,
+        limit: int | None = None,
+    ) -> pd.DataFrame:
+        if not self.db_path.exists():
+            self.init_schema()
+        filters = ["adjust = ?"]
+        params: list[object] = [adjust]
+        if split:
+            filters.append("dataset_split = ?")
+            params.append(split)
+        if target:
+            filters.append(f"{target} IS NOT NULL")
+        limit_sql = f"LIMIT {int(limit)}" if limit else ""
+        with self.connect(read_only=True) as conn:
+            return conn.execute(
+                f"""
+                SELECT *
+                FROM model_training_dataset
+                WHERE {' AND '.join(filters)}
+                ORDER BY trade_date, symbol
+                {limit_sql}
+                """,
+                params,
+            ).fetchdf()
+
     def derive_missing_suspensions(self, adjust: str = "qfq") -> pd.DataFrame:
         if not self.db_path.exists():
             self.init_schema()
@@ -422,6 +508,24 @@ class MarketDataRepository:
         labels = build_training_labels(prices, adjust=adjust)
         return self.upsert_training_labels(labels)
 
+    def build_and_store_model_training_dataset(
+        self,
+        adjust: str = "qfq",
+        target: str = "future_return_5d",
+        train_ratio: float = 0.7,
+        valid_ratio: float = 0.15,
+    ) -> int:
+        dataset = build_model_training_dataset(
+            technical_features=self.query_technical_features(adjust=adjust),
+            training_labels=self.query_training_labels(adjust=adjust),
+            limit_status=self.query_daily_limit_status(adjust=adjust),
+            suspensions=self.query_stock_suspensions(),
+            target=target,
+            train_ratio=train_ratio,
+            valid_ratio=valid_ratio,
+        )
+        return self.upsert_model_training_dataset(dataset)
+
     def table_counts(self) -> pd.DataFrame:
         if not self.db_path.exists():
             self.init_schema()
@@ -433,6 +537,7 @@ class MarketDataRepository:
             "daily_limit_status",
             "technical_features",
             "training_labels",
+            "model_training_dataset",
         ]
         rows = []
         with self.connect(read_only=True) as conn:

@@ -124,4 +124,46 @@ CREATE TABLE IF NOT EXISTS training_labels (
 
 CREATE INDEX IF NOT EXISTS idx_training_labels_symbol_date
 ON training_labels(symbol, trade_date);
+
+CREATE TABLE IF NOT EXISTS model_training_dataset (
+    symbol VARCHAR NOT NULL,
+    ts_code VARCHAR NOT NULL,
+    trade_date DATE NOT NULL,
+    adjust VARCHAR NOT NULL,
+    dataset_split VARCHAR NOT NULL,
+    close DOUBLE,
+    return_1d DOUBLE,
+    return_5d DOUBLE,
+    return_20d DOUBLE,
+    ma_5 DOUBLE,
+    ma_10 DOUBLE,
+    ma_20 DOUBLE,
+    ma_60 DOUBLE,
+    ma_5_ratio DOUBLE,
+    ma_20_ratio DOUBLE,
+    volatility_5 DOUBLE,
+    volatility_20 DOUBLE,
+    volume_ma_5 DOUBLE,
+    volume_ma_20 DOUBLE,
+    volume_ratio_5 DOUBLE,
+    rsi_14 DOUBLE,
+    macd DOUBLE,
+    macd_signal DOUBLE,
+    macd_hist DOUBLE,
+    is_limit_up BOOLEAN,
+    is_limit_down BOOLEAN,
+    is_suspended BOOLEAN,
+    future_return_1d DOUBLE,
+    future_return_5d DOUBLE,
+    future_return_20d DOUBLE,
+    future_max_drawdown_5d DOUBLE,
+    future_max_drawdown_20d DOUBLE,
+    label_up_5d BOOLEAN,
+    label_up_20d BOOLEAN,
+    updated_at TIMESTAMP NOT NULL,
+    PRIMARY KEY (symbol, trade_date, adjust)
+);
+
+CREATE INDEX IF NOT EXISTS idx_model_training_dataset_split_date
+ON model_training_dataset(dataset_split, trade_date);
 """

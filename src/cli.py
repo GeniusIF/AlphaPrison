@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 import argparse
+import json
 from dataclasses import dataclass
 
 import pandas as pd
 
 from src.collectors.akshare_client import AkshareCollector
 from src.database.repository import MarketDataRepository
+from src.models.dataset import LABEL_COLUMNS
+from src.models.train_lgbm import train_lgbm_regressor
 from src.utils.config import load_yaml
 
 
 DATA_SOURCE_CONFIG = "config/data_source.yaml"
+MODEL_CONFIG = "config/model.yaml"
 
 
 @dataclass(frozen=True)
@@ -157,6 +161,49 @@ def cmd_build_dataset(args: argparse.Namespace) -> None:
     print(f"Upserted {label_rows} training_labels rows")
 
 
+def cmd_build_training_dataset(args: argparse.Namespace) -> None:
+    context = build_context()
+    model_config = load_yaml(MODEL_CONFIG)
+    dataset_config = model_config.get("dataset", {})
+    target = args.target or dataset_config.get("target", "future_return_5d")
+    train_ratio = args.train_ratio or float(dataset_config.get("train_ratio", 0.7))
+    valid_ratio = args.valid_ratio or float(dataset_config.get("valid_ratio", 0.15))
+    validate_target(target)
+    row_count = context.repository.build_and_store_model_training_dataset(
+        adjust=args.adjust,
+        target=target,
+        train_ratio=train_ratio,
+        valid_ratio=valid_ratio,
+    )
+    print(f"Upserted {row_count} model_training_dataset rows")
+
+
+def cmd_train_lgbm(args: argparse.Namespace) -> None:
+    context = build_context()
+    model_config = load_yaml(MODEL_CONFIG)
+    dataset_config = model_config.get("dataset", {})
+    artifact_config = model_config.get("artifacts", {})
+    target = args.target or dataset_config.get("target", "future_return_5d")
+    validate_target(target)
+
+    dataset = context.repository.query_model_training_dataset(
+        adjust=args.adjust,
+        target=target,
+    )
+    if dataset.empty:
+        print("No training dataset found. Run build-training-dataset first.")
+        return
+
+    metrics = train_lgbm_regressor(
+        dataset=dataset,
+        target=target,
+        model_config=model_config.get("lightgbm", {}),
+        model_dir=artifact_config.get("model_dir", "artifacts/models"),
+        report_dir=artifact_config.get("report_dir", "artifacts/reports"),
+    )
+    print(json.dumps(metrics, indent=2, ensure_ascii=False))
+
+
 def cmd_counts(_: argparse.Namespace) -> None:
     context = build_context()
     print(format_frame(context.repository.table_counts()))
@@ -199,6 +246,26 @@ def cmd_query_labels(args: argparse.Namespace) -> None:
     if args.tail:
         frame = frame.tail(args.tail)
     print(format_frame(frame))
+
+
+def cmd_query_training_dataset(args: argparse.Namespace) -> None:
+    context = build_context()
+    target = args.target
+    if target:
+        validate_target(target)
+    frame = context.repository.query_model_training_dataset(
+        adjust=args.adjust,
+        target=target,
+        split=args.split,
+    )
+    if args.tail:
+        frame = frame.tail(args.tail)
+    print(format_frame(frame))
+
+
+def validate_target(target: str) -> None:
+    if target not in LABEL_COLUMNS:
+        raise ValueError(f"Unsupported target: {target}. Choose one of: {', '.join(LABEL_COLUMNS)}")
 
 
 def format_frame(frame: pd.DataFrame) -> str:
@@ -252,6 +319,18 @@ def build_parser() -> argparse.ArgumentParser:
     build_dataset.add_argument("--adjust", default="qfq", choices=["", "qfq", "hfq"], help="复权类型")
     build_dataset.set_defaults(func=cmd_build_dataset)
 
+    build_training_dataset = subparsers.add_parser("build-training-dataset", help="合并技术因子和训练标签，生成模型训练表")
+    build_training_dataset.add_argument("--adjust", default="qfq", choices=["", "qfq", "hfq"], help="复权类型")
+    build_training_dataset.add_argument("--target", help="目标标签，例如 future_return_5d")
+    build_training_dataset.add_argument("--train-ratio", type=float, help="训练集时间占比")
+    build_training_dataset.add_argument("--valid-ratio", type=float, help="验证集时间占比")
+    build_training_dataset.set_defaults(func=cmd_build_training_dataset)
+
+    train_lgbm = subparsers.add_parser("train-lgbm", help="训练 LightGBM 回归模型")
+    train_lgbm.add_argument("--adjust", default="qfq", choices=["", "qfq", "hfq"], help="复权类型")
+    train_lgbm.add_argument("--target", help="目标标签，例如 future_return_5d")
+    train_lgbm.set_defaults(func=cmd_train_lgbm)
+
     query = subparsers.add_parser("query", help="查询某只股票日线")
     query.add_argument("--symbol", required=True, help="股票代码，例如 000001")
     query.add_argument("--start-date", help="开始日期，格式 YYYY-MM-DD 或 YYYYMMDD")
@@ -278,6 +357,13 @@ def build_parser() -> argparse.ArgumentParser:
     query_labels.add_argument("--adjust", default="qfq", choices=["", "qfq", "hfq"], help="复权类型")
     query_labels.add_argument("--tail", type=int, help="只显示最后 N 行")
     query_labels.set_defaults(func=cmd_query_labels)
+
+    query_training_dataset = subparsers.add_parser("query-training-dataset", help="查询模型训练表")
+    query_training_dataset.add_argument("--adjust", default="qfq", choices=["", "qfq", "hfq"], help="复权类型")
+    query_training_dataset.add_argument("--target", help="只保留目标标签非空的样本")
+    query_training_dataset.add_argument("--split", choices=["train", "valid", "test"], help="只查看某个时间切分")
+    query_training_dataset.add_argument("--tail", type=int, help="只显示最后 N 行")
+    query_training_dataset.set_defaults(func=cmd_query_training_dataset)
 
     counts = subparsers.add_parser("counts", help="查看核心数据表行数")
     counts.set_defaults(func=cmd_counts)

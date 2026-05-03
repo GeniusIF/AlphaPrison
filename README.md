@@ -144,6 +144,64 @@ python -m src.cli query-labels --symbol 600519 --tail 5
 
 这里有个重要概念：`features` 是模型在当下能看到的信息，`labels` 是未来才知道的答案。训练时要用历史样本让模型学习“当时的特征”和“后来发生了什么”之间的关系，绝不能把未来信息混进特征里。
 
+## LightGBM 训练
+
+训练前先把特征和标签合并成 `model_training_dataset`：
+
+```bash
+python -m src.cli build-training-dataset
+```
+
+这一步会按下面的键合并：
+
+```text
+symbol + trade_date + adjust
+```
+
+并按时间顺序切成三段：
+
+- `train`：较早的 70% 日期
+- `valid`：中间的 15% 日期
+- `test`：最后的 15% 日期
+
+注意这里不是随机切分。股票模型必须尽量模拟真实场景：只能用过去训练，然后看未来表现。
+
+查看训练表：
+
+```bash
+python -m src.cli query-training-dataset --target future_return_5d --tail 5
+python -m src.cli query-training-dataset --split test --target future_return_5d --tail 5
+```
+
+训练 LightGBM：
+
+```bash
+python -m src.cli train-lgbm
+```
+
+默认目标是 `future_return_5d`，也就是预测未来 5 个交易日收益率。配置在：
+
+```text
+config/model.yaml
+```
+
+训练完成后会在本地生成：
+
+```text
+artifacts/models/   模型文件
+artifacts/reports/  指标、预测结果、特征重要性
+```
+
+这些是运行产物，默认不会提交到 GitHub。
+
+第一次模型结果不要只看训练集。如果出现：
+
+```text
+train 很好，valid/test 很差
+```
+
+这通常叫过拟合。它说明模型记住了过去的小样本，但没有学到稳定的未来规律。后面要靠更多股票、更长时间、更好的因子、更严格回测来改善。
+
 ## 项目结构
 
 ```text
@@ -164,7 +222,7 @@ tests/                   单元测试
 建议按这个顺序继续：
 
 1. 加入交易日历、停复牌、涨跌停数据。
-2. 接 LightGBM 训练和滚动验证。
+2. 做 LightGBM 滚动验证和预测信号表。
 3. 做真实化回测，包括费用、滑点、T+1、涨跌停不能成交。
 4. 接入公告/新闻的大模型事件分析信号。
 5. 接入手动持仓和组合风险看板。

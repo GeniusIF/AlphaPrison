@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -36,7 +37,7 @@ left.metric("本地股票数", len(stocks))
 mid.metric("最新行情数", len(latest))
 right.metric("数据库", str(repo.db_path.name))
 
-tab_market, tab_stock, tab_dataset = st.tabs(["市场数据", "股票详情", "训练集"])
+tab_market, tab_stock, tab_dataset, tab_model = st.tabs(["市场数据", "股票详情", "训练集", "模型训练"])
 
 with tab_market:
     st.subheader("核心表行数")
@@ -110,3 +111,26 @@ with tab_dataset:
         st.dataframe(features, use_container_width=True, hide_index=True)
         st.subheader("训练标签")
         st.dataframe(labels, use_container_width=True, hide_index=True)
+
+with tab_model:
+    st.subheader("训练表")
+    training_rows = counts.loc[counts["table"] == "model_training_dataset", "rows"]
+    st.metric("训练样本数", int(training_rows.iloc[0]) if not training_rows.empty else 0)
+
+    report_dir = ROOT / "artifacts" / "reports"
+    metrics_files = sorted(report_dir.glob("*_metrics.json"))
+    if not metrics_files:
+        st.info("还没有模型报告。先运行：python -m src.cli train-lgbm")
+    else:
+        latest_metrics = metrics_files[-1]
+        metrics = json.loads(latest_metrics.read_text(encoding="utf-8"))
+        st.caption(latest_metrics.name)
+
+        cols = st.columns(3)
+        for col, split in zip(cols, ["train", "valid", "test"]):
+            score = metrics["scores"][split]
+            col.metric(f"{split} RMSE", f"{score['rmse']:.4f}")
+            col.metric(f"{split} 方向准确率", f"{score['directional_accuracy']:.2%}")
+
+        st.subheader("完整指标")
+        st.json(metrics)

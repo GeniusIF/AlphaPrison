@@ -8,4 +8,8 @@ data/duckdb/*.wal
 data/raw/*
 data/processed/*
 !.gitkeep
+artifacts/models/*
+artifacts/reports/*
+!artifacts/models/.gitkeep
+!artifacts/reports/.gitkeep
 *.log
