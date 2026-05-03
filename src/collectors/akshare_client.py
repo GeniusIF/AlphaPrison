@@ -93,6 +93,22 @@ class AkshareCollector:
         time.sleep(self.request_interval_seconds)
         return normalize_daily_price_frame(frame, normalized, adjust)
 
+    def fetch_trade_calendar(self, start_date: str | None = None, end_date: str | None = None) -> pd.DataFrame:
+        ak = self._akshare()
+        frame = ak.tool_trade_date_hist_sina()
+        time.sleep(self.request_interval_seconds)
+        return normalize_trade_calendar_frame(frame, start_date=start_date, end_date=end_date)
+
+    def fetch_suspensions_by_date(
+        self,
+        trade_date: str,
+        pool_symbols: Iterable[str] | None = None,
+    ) -> pd.DataFrame:
+        ak = self._akshare()
+        frame = ak.stock_tfp_em(date=trade_date)
+        time.sleep(self.request_interval_seconds)
+        return normalize_suspension_frame(frame, trade_date=trade_date, pool_symbols=pool_symbols)
+
 
 def normalize_daily_price_frame(frame: pd.DataFrame, symbol: str, adjust: str) -> pd.DataFrame:
     if frame.empty:
@@ -184,3 +200,56 @@ def clean_stock_name(name: object) -> str:
     if name is None:
         return ""
     return "".join(str(name).split())
+
+
+def normalize_trade_calendar_frame(
+    frame: pd.DataFrame,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> pd.DataFrame:
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    data = frame.rename(columns={"trade_date": "trade_date"}).copy()
+    data["trade_date"] = pd.to_datetime(data["trade_date"]).dt.date
+    if start_date:
+        data = data[data["trade_date"] >= pd.to_datetime(start_date).date()]
+    if end_date:
+        data = data[data["trade_date"] <= pd.to_datetime(end_date).date()]
+    data = data.drop_duplicates(subset=["trade_date"]).sort_values("trade_date")
+    data["is_open"] = True
+    data["source"] = "akshare_sina"
+    data["updated_at"] = now
+    return data[["trade_date", "is_open", "source", "updated_at"]].reset_index(drop=True)
+
+
+def normalize_suspension_frame(
+    frame: pd.DataFrame,
+    trade_date: str,
+    pool_symbols: Iterable[str] | None = None,
+) -> pd.DataFrame:
+    columns = ["symbol", "ts_code", "trade_date", "is_suspended", "reason", "source", "updated_at"]
+    if frame.empty:
+        return pd.DataFrame(columns=columns)
+
+    pool = {normalize_symbol(symbol) for symbol in pool_symbols or []}
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    date_value = pd.to_datetime(trade_date).date()
+    data = frame.rename(
+        columns={
+            "代码": "symbol",
+            "停牌原因": "reason",
+        }
+    ).copy()
+    data["symbol"] = data["symbol"].map(normalize_symbol)
+    if pool:
+        data = data[data["symbol"].isin(pool)]
+    if data.empty:
+        return pd.DataFrame(columns=columns)
+
+    data["ts_code"] = data["symbol"].map(to_ts_code)
+    data["trade_date"] = date_value
+    data["is_suspended"] = True
+    data["source"] = "akshare_eastmoney"
+    data["updated_at"] = now
+    if "reason" not in data.columns:
+        data["reason"] = None
+    return data[columns].drop_duplicates(subset=["symbol", "trade_date", "source"]).reset_index(drop=True)

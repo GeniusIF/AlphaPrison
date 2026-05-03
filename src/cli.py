@@ -76,6 +76,92 @@ def cmd_collect(args: argparse.Namespace) -> None:
             print(f"- {symbol}: {error}")
 
 
+def cmd_collect_calendar(args: argparse.Namespace) -> None:
+    context = build_context()
+    ak_config = context.config.get("akshare", {})
+    start_date = args.start_date or ak_config.get("default_start_date")
+    end_date = args.end_date or ak_config.get("default_end_date")
+    calendar = context.collector.fetch_trade_calendar(start_date=start_date, end_date=end_date)
+    row_count = context.repository.upsert_trade_calendar(calendar)
+    print(f"Upserted {row_count} trade_calendar rows")
+
+
+def cmd_collect_suspensions(args: argparse.Namespace) -> None:
+    context = build_context()
+    pool = select_pool(context.config, args.limit)
+    pool_symbols = [item["symbol"] for item in pool]
+    calendar = context.repository.query_trade_calendar(start_date=args.start_date, end_date=args.end_date)
+    if calendar.empty:
+        print("No trade calendar rows found. Run collect-calendar first.")
+        return
+
+    total_rows = 0
+    failures: list[tuple[str, str]] = []
+    for row in calendar.itertuples():
+        trade_date = pd.Timestamp(row.trade_date).strftime("%Y%m%d")
+        try:
+            suspensions = context.collector.fetch_suspensions_by_date(trade_date, pool_symbols=pool_symbols)
+            row_count = context.repository.upsert_stock_suspensions(suspensions)
+            total_rows += row_count
+            if row_count:
+                print(f"{trade_date}: upserted {row_count} suspension rows")
+        except Exception as exc:
+            failures.append((trade_date, str(exc)))
+            print(f"{trade_date}: failed - {exc}")
+    print(f"Finished. Upserted {total_rows} stock_suspension rows.")
+    if failures:
+        print("Failures:")
+        for trade_date, error in failures:
+            print(f"- {trade_date}: {error}")
+
+
+def cmd_derive_suspensions(args: argparse.Namespace) -> None:
+    context = build_context()
+    suspensions = context.repository.derive_missing_suspensions(adjust=args.adjust)
+    row_count = context.repository.upsert_stock_suspensions(suspensions)
+    print(f"Upserted {row_count} derived stock_suspension rows")
+
+
+def cmd_build_limit_status(args: argparse.Namespace) -> None:
+    context = build_context()
+    limit_status = context.repository.build_daily_limit_status(adjust=args.adjust)
+    row_count = context.repository.upsert_daily_limit_status(limit_status)
+    print(f"Upserted {row_count} daily_limit_status rows")
+
+
+def cmd_build_features(args: argparse.Namespace) -> None:
+    context = build_context()
+    row_count = context.repository.build_and_store_technical_features(adjust=args.adjust)
+    print(f"Upserted {row_count} technical_features rows")
+
+
+def cmd_build_labels(args: argparse.Namespace) -> None:
+    context = build_context()
+    row_count = context.repository.build_and_store_training_labels(adjust=args.adjust)
+    print(f"Upserted {row_count} training_labels rows")
+
+
+def cmd_build_dataset(args: argparse.Namespace) -> None:
+    context = build_context()
+    limit_rows = context.repository.upsert_daily_limit_status(
+        context.repository.build_daily_limit_status(adjust=args.adjust)
+    )
+    suspension_rows = context.repository.upsert_stock_suspensions(
+        context.repository.derive_missing_suspensions(adjust=args.adjust)
+    )
+    feature_rows = context.repository.build_and_store_technical_features(adjust=args.adjust)
+    label_rows = context.repository.build_and_store_training_labels(adjust=args.adjust)
+    print(f"Upserted {limit_rows} daily_limit_status rows")
+    print(f"Upserted {suspension_rows} derived stock_suspension rows")
+    print(f"Upserted {feature_rows} technical_features rows")
+    print(f"Upserted {label_rows} training_labels rows")
+
+
+def cmd_counts(_: argparse.Namespace) -> None:
+    context = build_context()
+    print(format_frame(context.repository.table_counts()))
+
+
 def cmd_query(args: argparse.Namespace) -> None:
     context = build_context()
     frame = context.repository.query_daily_prices(
@@ -99,6 +185,22 @@ def cmd_latest(args: argparse.Namespace) -> None:
     print(format_frame(context.repository.latest_daily_prices(adjust=args.adjust)))
 
 
+def cmd_query_features(args: argparse.Namespace) -> None:
+    context = build_context()
+    frame = context.repository.query_technical_features(symbol=args.symbol, adjust=args.adjust)
+    if args.tail:
+        frame = frame.tail(args.tail)
+    print(format_frame(frame))
+
+
+def cmd_query_labels(args: argparse.Namespace) -> None:
+    context = build_context()
+    frame = context.repository.query_training_labels(symbol=args.symbol, adjust=args.adjust)
+    if args.tail:
+        frame = frame.tail(args.tail)
+    print(format_frame(frame))
+
+
 def format_frame(frame: pd.DataFrame) -> str:
     if frame.empty:
         return "(empty)"
@@ -119,6 +221,37 @@ def build_parser() -> argparse.ArgumentParser:
     collect.add_argument("--limit", type=int, default=10, help="调试股票数量")
     collect.set_defaults(func=cmd_collect)
 
+    collect_calendar = subparsers.add_parser("collect-calendar", help="采集交易日历并入库")
+    collect_calendar.add_argument("--start-date", help="开始日期，格式 YYYYMMDD")
+    collect_calendar.add_argument("--end-date", help="结束日期，格式 YYYYMMDD")
+    collect_calendar.set_defaults(func=cmd_collect_calendar)
+
+    collect_suspensions = subparsers.add_parser("collect-suspensions", help="按交易日采集停复牌公告并入库")
+    collect_suspensions.add_argument("--start-date", help="开始日期，格式 YYYY-MM-DD 或 YYYYMMDD")
+    collect_suspensions.add_argument("--end-date", help="结束日期，格式 YYYY-MM-DD 或 YYYYMMDD")
+    collect_suspensions.add_argument("--limit", type=int, default=10, help="调试股票数量")
+    collect_suspensions.set_defaults(func=cmd_collect_suspensions)
+
+    derive_suspensions = subparsers.add_parser("derive-suspensions", help="根据交易日有无日线数据推导停牌/缺失状态")
+    derive_suspensions.add_argument("--adjust", default="qfq", choices=["", "qfq", "hfq"], help="复权类型")
+    derive_suspensions.set_defaults(func=cmd_derive_suspensions)
+
+    build_limit_status = subparsers.add_parser("build-limit-status", help="根据日线涨跌幅生成涨跌停标记")
+    build_limit_status.add_argument("--adjust", default="qfq", choices=["", "qfq", "hfq"], help="复权类型")
+    build_limit_status.set_defaults(func=cmd_build_limit_status)
+
+    build_features = subparsers.add_parser("build-features", help="生成基础技术因子")
+    build_features.add_argument("--adjust", default="qfq", choices=["", "qfq", "hfq"], help="复权类型")
+    build_features.set_defaults(func=cmd_build_features)
+
+    build_labels = subparsers.add_parser("build-labels", help="生成训练标签")
+    build_labels.add_argument("--adjust", default="qfq", choices=["", "qfq", "hfq"], help="复权类型")
+    build_labels.set_defaults(func=cmd_build_labels)
+
+    build_dataset = subparsers.add_parser("build-dataset", help="生成涨跌停、推导停牌、技术因子和训练标签")
+    build_dataset.add_argument("--adjust", default="qfq", choices=["", "qfq", "hfq"], help="复权类型")
+    build_dataset.set_defaults(func=cmd_build_dataset)
+
     query = subparsers.add_parser("query", help="查询某只股票日线")
     query.add_argument("--symbol", required=True, help="股票代码，例如 000001")
     query.add_argument("--start-date", help="开始日期，格式 YYYY-MM-DD 或 YYYYMMDD")
@@ -133,6 +266,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     list_stocks = subparsers.add_parser("list-stocks", help="列出本地股票基础信息")
     list_stocks.set_defaults(func=cmd_list_stocks)
+
+    query_features = subparsers.add_parser("query-features", help="查询技术因子")
+    query_features.add_argument("--symbol", help="股票代码，例如 000001")
+    query_features.add_argument("--adjust", default="qfq", choices=["", "qfq", "hfq"], help="复权类型")
+    query_features.add_argument("--tail", type=int, help="只显示最后 N 行")
+    query_features.set_defaults(func=cmd_query_features)
+
+    query_labels = subparsers.add_parser("query-labels", help="查询训练标签")
+    query_labels.add_argument("--symbol", help="股票代码，例如 000001")
+    query_labels.add_argument("--adjust", default="qfq", choices=["", "qfq", "hfq"], help="复权类型")
+    query_labels.add_argument("--tail", type=int, help="只显示最后 N 行")
+    query_labels.set_defaults(func=cmd_query_labels)
+
+    counts = subparsers.add_parser("counts", help="查看核心数据表行数")
+    counts.set_defaults(func=cmd_counts)
 
     return parser
 
