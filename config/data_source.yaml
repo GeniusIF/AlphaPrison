@@ -1,0 +1,30 @@
+database:
+  path: data/duckdb/a_stock.duckdb
+
+akshare:
+  default_start_date: "20240101"
+  default_end_date: "20260503"
+  default_adjust: qfq
+  request_interval_seconds: 0.25
+
+debug_stock_pool:
+  - symbol: "000001"
+    name: 平安银行
+  - symbol: "000002"
+    name: 万科A
+  - symbol: "600000"
+    name: 浦发银行
+  - symbol: "600519"
+    name: 贵州茅台
+  - symbol: "000858"
+    name: 五粮液
+  - symbol: "601318"
+    name: 中国平安
+  - symbol: "600036"
+    name: 招商银行
+  - symbol: "300750"
+    name: 宁德时代
+  - symbol: "002594"
+    name: 比亚迪
+  - symbol: "600276"
+    name: 恒瑞医药
