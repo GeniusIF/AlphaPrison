@@ -6,6 +6,8 @@ from dataclasses import dataclass
 
 import pandas as pd
 
+from src.backtest.factor_backtest import backtest_single_factors
+from src.backtest.multifactor_backtest import backtest_multifactor_strategy, rolling_backtest_multifactor_strategy
 from src.collectors.akshare_client import AkshareCollector
 from src.database.repository import MarketDataRepository
 from src.models.baseline import train_baseline_models
@@ -19,6 +21,7 @@ from src.utils.config import load_yaml
 
 DATA_SOURCE_CONFIG = "config/data_source.yaml"
 MODEL_CONFIG = "config/model.yaml"
+TRADING_COST_CONFIG = "config/trading_cost.yaml"
 
 
 @dataclass(frozen=True)
@@ -66,13 +69,15 @@ def cmd_collect(args: argparse.Namespace) -> None:
 
     total_rows = 0
     failures: list[tuple[str, str]] = []
-    for item in pool:
+    progress_every = max(1, int(args.progress_every or 1))
+    for index, item in enumerate(pool, start=1):
         symbol = item["symbol"]
         try:
             daily = context.collector.fetch_daily_price(symbol, start_date, end_date, adjust)
             row_count = context.repository.upsert_daily_prices(daily)
             total_rows += row_count
-            print(f"{symbol}: upserted {row_count} daily rows")
+            if not args.quiet and (index == 1 or index % progress_every == 0 or index == len(pool)):
+                print(f"{index}/{len(pool)} {symbol}: upserted {row_count} daily rows, total {total_rows}")
         except Exception as exc:
             failures.append((symbol, str(exc)))
             print(f"{symbol}: failed - {exc}")
@@ -87,10 +92,15 @@ def cmd_collect(args: argparse.Namespace) -> None:
 def cmd_collect_stock_pool(args: argparse.Namespace) -> None:
     context = build_context()
     stock_pool = context.collector.fetch_a_stock_pool(limit=args.limit)
-    row_count = context.repository.upsert_stock_basic(stock_pool)
-    print(f"Upserted {row_count} stock_basic rows from AKShare pool")
+    row_count = context.repository.replace_stock_basic(stock_pool)
+    print(f"Replaced stock_basic with {row_count} filtered stock pool rows")
     if args.show:
         print(format_frame(stock_pool.head(args.show)))
+
+
+def cmd_prune_market_data(_: argparse.Namespace) -> None:
+    context = build_context()
+    print(format_frame(context.repository.prune_market_data_to_stock_basic()))
 
 
 def cmd_collect_calendar(args: argparse.Namespace) -> None:
@@ -271,6 +281,282 @@ def cmd_analyze_factors(args: argparse.Namespace) -> None:
     print(json.dumps(report, indent=2, ensure_ascii=False))
 
 
+def cmd_backtest_factors(args: argparse.Namespace) -> None:
+    context = build_context()
+    model_config = load_yaml(MODEL_CONFIG)
+    trading_cost_config = load_yaml(TRADING_COST_CONFIG)
+    dataset_config = model_config.get("dataset", {})
+    factor_config = model_config.get("factor_analysis", {})
+    backtest_config = model_config.get("factor_backtest", {})
+    artifact_config = model_config.get("artifacts", {})
+    target = args.target or dataset_config.get("target", "future_return_5d")
+    validate_target(target)
+
+    dataset = context.repository.query_model_training_dataset(
+        adjust=args.adjust,
+        target=target,
+    )
+    if dataset.empty:
+        print("No training dataset found. Run build-training-dataset first.")
+        return
+
+    cost_rate = args.cost_rate
+    if cost_rate is None:
+        cost_rate = estimate_round_trip_cost_rate(trading_cost_config)
+
+    report = backtest_single_factors(
+        dataset=dataset,
+        target=target,
+        report_dir=artifact_config.get("report_dir", "artifacts/reports"),
+        quantile=args.quantile or float(backtest_config.get("quantile", 0.2)),
+        top_n=args.top_n or backtest_config.get("top_n"),
+        rebalance_step=args.rebalance_step or int(backtest_config.get("rebalance_step", 5)),
+        min_stocks_per_date=args.min_stocks_per_date or int(factor_config.get("min_stocks_per_date", 5)),
+        cost_rate=float(cost_rate),
+    )
+    print(json.dumps(report, indent=2, ensure_ascii=False))
+
+
+def cmd_backtest_multifactor(args: argparse.Namespace) -> None:
+    context = build_context()
+    model_config = load_yaml(MODEL_CONFIG)
+    trading_cost_config = load_yaml(TRADING_COST_CONFIG)
+    dataset_config = model_config.get("dataset", {})
+    factor_config = model_config.get("factor_analysis", {})
+    backtest_config = model_config.get("multifactor_backtest", {})
+    artifact_config = model_config.get("artifacts", {})
+    target = args.target or dataset_config.get("target", "future_return_5d")
+    validate_target(target)
+
+    dataset = context.repository.query_model_training_dataset(
+        adjust=args.adjust,
+        target=target,
+    )
+    if dataset.empty:
+        print("No training dataset found. Run build-training-dataset first.")
+        return
+
+    cost_rate = args.cost_rate
+    if cost_rate is None:
+        cost_rate = estimate_round_trip_cost_rate(trading_cost_config)
+
+    report = backtest_multifactor_strategy(
+        dataset=dataset,
+        target=target,
+        report_dir=artifact_config.get("report_dir", "artifacts/reports"),
+        quantile=args.quantile or float(backtest_config.get("quantile", 0.2)),
+        top_n=args.top_n or backtest_config.get("top_n"),
+        rebalance_step=args.rebalance_step or int(backtest_config.get("rebalance_step", 5)),
+        min_stocks_per_date=args.min_stocks_per_date or int(factor_config.get("min_stocks_per_date", 5)),
+        cost_rate=float(cost_rate),
+        max_factors=args.max_factors or int(backtest_config.get("max_factors", 5)),
+        min_abs_rank_ic=args.min_abs_rank_ic or float(backtest_config.get("min_abs_rank_ic", 0.02)),
+        evaluation_split=args.evaluation_split or str(backtest_config.get("evaluation_split", "test")),
+        weighting=args.weighting or str(backtest_config.get("weighting", "rank_ic")),
+    )
+    print(json.dumps(report, indent=2, ensure_ascii=False))
+
+
+def cmd_rolling_backtest_multifactor(args: argparse.Namespace) -> None:
+    context = build_context()
+    model_config = load_yaml(MODEL_CONFIG)
+    trading_cost_config = load_yaml(TRADING_COST_CONFIG)
+    dataset_config = model_config.get("dataset", {})
+    factor_config = model_config.get("factor_analysis", {})
+    backtest_config = model_config.get("multifactor_backtest", {})
+    rolling_config = model_config.get("rolling_multifactor_backtest", {})
+    artifact_config = model_config.get("artifacts", {})
+    target = args.target or dataset_config.get("target", "future_return_5d")
+    validate_target(target)
+
+    dataset = context.repository.query_model_training_dataset(
+        adjust=args.adjust,
+        target=target,
+    )
+    if dataset.empty:
+        print("No training dataset found. Run build-training-dataset first.")
+        return
+
+    cost_rate = args.cost_rate
+    if cost_rate is None:
+        cost_rate = estimate_round_trip_cost_rate(trading_cost_config)
+
+    report = rolling_backtest_multifactor_strategy(
+        dataset=dataset,
+        target=target,
+        report_dir=artifact_config.get("report_dir", "artifacts/reports"),
+        quantile=args.quantile or float(backtest_config.get("quantile", 0.2)),
+        top_n=args.top_n or backtest_config.get("top_n"),
+        rebalance_step=args.rebalance_step or int(backtest_config.get("rebalance_step", 5)),
+        min_stocks_per_date=args.min_stocks_per_date or int(factor_config.get("min_stocks_per_date", 5)),
+        cost_rate=float(cost_rate),
+        max_factors=args.max_factors or int(backtest_config.get("max_factors", 5)),
+        min_abs_rank_ic=args.min_abs_rank_ic or float(backtest_config.get("min_abs_rank_ic", 0.02)),
+        weighting=args.weighting or str(backtest_config.get("weighting", "rank_ic")),
+        train_window=args.train_window or int(rolling_config.get("train_window", 252)),
+        test_window=args.test_window or int(rolling_config.get("test_window", 63)),
+        step=args.step or int(rolling_config.get("step", 63)),
+        embargo_days=args.embargo_days if args.embargo_days is not None else int(rolling_config.get("embargo_days", 5)),
+        min_train_rows=args.min_train_rows or int(rolling_config.get("min_train_rows", 200)),
+    )
+    print(json.dumps(report, indent=2, ensure_ascii=False))
+
+
+def cmd_run_research(args: argparse.Namespace) -> None:
+    context = build_context()
+    model_config = load_yaml(MODEL_CONFIG)
+    trading_cost_config = load_yaml(TRADING_COST_CONFIG)
+    dataset_config = model_config.get("dataset", {})
+    factor_config = model_config.get("factor_analysis", {})
+    factor_backtest_config = model_config.get("factor_backtest", {})
+    multifactor_config = model_config.get("multifactor_backtest", {})
+    rolling_multifactor_config = model_config.get("rolling_multifactor_backtest", {})
+    rolling_lgbm_config = model_config.get("rolling_validation", {})
+    baseline_config = model_config.get("baseline", {})
+    artifact_config = model_config.get("artifacts", {})
+    target = args.target or dataset_config.get("target", "future_return_5d")
+    validate_target(target)
+
+    adjust = args.adjust
+    report_dir = artifact_config.get("report_dir", "artifacts/reports")
+    model_dir = artifact_config.get("model_dir", "artifacts/models")
+    cost_rate = estimate_round_trip_cost_rate(trading_cost_config)
+
+    if args.rebuild_dataset:
+        print("[1/9] Rebuilding derived dataset")
+        limit_rows = context.repository.upsert_daily_limit_status(
+            context.repository.build_daily_limit_status(adjust=adjust)
+        )
+        suspension_rows = context.repository.upsert_stock_suspensions(
+            context.repository.derive_missing_suspensions(adjust=adjust)
+        )
+        feature_rows = context.repository.build_and_store_technical_features(adjust=adjust)
+        label_rows = context.repository.build_and_store_training_labels(adjust=adjust)
+        training_rows = context.repository.build_and_store_model_training_dataset(
+            adjust=adjust,
+            target=target,
+            train_ratio=float(dataset_config.get("train_ratio", 0.7)),
+            valid_ratio=float(dataset_config.get("valid_ratio", 0.15)),
+        )
+        print(
+            f"built rows: limit={limit_rows}, suspensions={suspension_rows}, "
+            f"features={feature_rows}, labels={label_rows}, training={training_rows}"
+        )
+    else:
+        print("[1/9] Reusing existing model_training_dataset")
+
+    dataset = context.repository.query_model_training_dataset(adjust=adjust, target=target)
+    if dataset.empty:
+        print("No training dataset found. Run build-training-dataset first.")
+        return
+
+    step_no = 2
+    print(f"[{step_no}/9] analyze-factors")
+    factor_report = analyze_factors(
+        dataset=dataset,
+        target=target,
+        report_dir=report_dir,
+        quantiles=int(factor_config.get("quantiles", 5)),
+        min_stocks_per_date=int(factor_config.get("min_stocks_per_date", 5)),
+    )
+    print_report_path("factor_analysis", factor_report)
+
+    step_no += 1
+    print(f"[{step_no}/9] backtest-factors")
+    single_factor_report = backtest_single_factors(
+        dataset=dataset,
+        target=target,
+        report_dir=report_dir,
+        quantile=float(factor_backtest_config.get("quantile", 0.2)),
+        top_n=factor_backtest_config.get("top_n"),
+        rebalance_step=int(factor_backtest_config.get("rebalance_step", 5)),
+        min_stocks_per_date=int(factor_config.get("min_stocks_per_date", 5)),
+        cost_rate=cost_rate,
+    )
+    print_report_path("factor_backtest", single_factor_report)
+
+    step_no += 1
+    print(f"[{step_no}/9] backtest-multifactor")
+    multifactor_report = backtest_multifactor_strategy(
+        dataset=dataset,
+        target=target,
+        report_dir=report_dir,
+        quantile=float(multifactor_config.get("quantile", 0.2)),
+        top_n=multifactor_config.get("top_n"),
+        rebalance_step=int(multifactor_config.get("rebalance_step", 5)),
+        min_stocks_per_date=int(factor_config.get("min_stocks_per_date", 5)),
+        cost_rate=cost_rate,
+        max_factors=int(multifactor_config.get("max_factors", 5)),
+        min_abs_rank_ic=float(multifactor_config.get("min_abs_rank_ic", 0.02)),
+        evaluation_split=str(multifactor_config.get("evaluation_split", "test")),
+        weighting=str(multifactor_config.get("weighting", "rank_ic")),
+    )
+    print_report_path("multifactor_backtest", multifactor_report)
+
+    step_no += 1
+    print(f"[{step_no}/9] rolling-backtest-multifactor")
+    rolling_multifactor_report = rolling_backtest_multifactor_strategy(
+        dataset=dataset,
+        target=target,
+        report_dir=report_dir,
+        quantile=float(multifactor_config.get("quantile", 0.2)),
+        top_n=multifactor_config.get("top_n"),
+        rebalance_step=int(multifactor_config.get("rebalance_step", 5)),
+        min_stocks_per_date=int(factor_config.get("min_stocks_per_date", 5)),
+        cost_rate=cost_rate,
+        max_factors=int(multifactor_config.get("max_factors", 5)),
+        min_abs_rank_ic=float(multifactor_config.get("min_abs_rank_ic", 0.02)),
+        weighting=str(multifactor_config.get("weighting", "rank_ic")),
+        train_window=int(rolling_multifactor_config.get("train_window", 252)),
+        test_window=int(rolling_multifactor_config.get("test_window", 63)),
+        step=int(rolling_multifactor_config.get("step", 63)),
+        embargo_days=int(rolling_multifactor_config.get("embargo_days", 5)),
+        min_train_rows=int(rolling_multifactor_config.get("min_train_rows", 200)),
+    )
+    print_report_path("rolling_multifactor_backtest", rolling_multifactor_report)
+
+    step_no += 1
+    print(f"[{step_no}/9] train-baseline")
+    baseline_report = train_baseline_models(
+        dataset=dataset,
+        target=target,
+        report_dir=report_dir,
+        ridge_alpha=float(baseline_config.get("ridge_alpha", 1.0)),
+    )
+    print_report_path("baseline", baseline_report, path_key="metrics_path")
+
+    if args.skip_lgbm:
+        print("[7/9] train-lgbm skipped")
+        print("[8/9] rolling-validate-lgbm skipped")
+    else:
+        step_no += 1
+        print(f"[{step_no}/9] train-lgbm")
+        lgbm_report = train_lgbm_regressor(
+            dataset=dataset,
+            target=target,
+            model_config=model_config.get("lightgbm", {}),
+            model_dir=model_dir,
+            report_dir=report_dir,
+        )
+        print_report_path("lgbm", lgbm_report, path_key="metrics_path")
+
+        step_no += 1
+        print(f"[{step_no}/9] rolling-validate-lgbm")
+        rolling_lgbm_report = rolling_validate_lgbm(
+            dataset=dataset,
+            target=target,
+            model_config=model_config.get("lightgbm", {}),
+            report_dir=report_dir,
+            train_window=int(rolling_lgbm_config.get("train_window", 252)),
+            test_window=int(rolling_lgbm_config.get("test_window", 63)),
+            step=int(rolling_lgbm_config.get("step", 63)),
+            min_train_rows=int(rolling_lgbm_config.get("min_train_rows", 200)),
+        )
+        print_report_path("rolling_lgbm", rolling_lgbm_report, path_key="metrics_path")
+
+    print("[9/9] done")
+
+
 def cmd_train_baseline(args: argparse.Namespace) -> None:
     context = build_context()
     model_config = load_yaml(MODEL_CONFIG)
@@ -393,6 +679,19 @@ def validate_target(target: str) -> None:
         raise ValueError(f"Unsupported target: {target}. Choose one of: {', '.join(LABEL_COLUMNS)}")
 
 
+def estimate_round_trip_cost_rate(config: dict) -> float:
+    commission = float(config.get("commission_rate", 0))
+    stamp_tax_sell = float(config.get("stamp_tax_sell_rate", 0))
+    transfer_fee = float(config.get("transfer_fee_rate", 0))
+    slippage = float(config.get("slippage_rate", 0))
+    return commission * 2 + stamp_tax_sell + transfer_fee * 2 + slippage * 2
+
+
+def print_report_path(name: str, report: dict, path_key: str = "report_path") -> None:
+    path = report.get(path_key) or report.get("metrics_path")
+    print(f"{name}: {path}")
+
+
 def format_frame(frame: pd.DataFrame) -> str:
     if frame.empty:
         return "(empty)"
@@ -412,12 +711,17 @@ def build_parser() -> argparse.ArgumentParser:
     collect.add_argument("--adjust", default="qfq", choices=["", "qfq", "hfq"], help="复权类型")
     collect.add_argument("--limit", type=int, default=10, help="调试股票数量")
     collect.add_argument("--pool-source", default="config", choices=["config", "db"], help="股票池来源")
+    collect.add_argument("--quiet", action="store_true", help="减少采集过程中的逐股票输出")
+    collect.add_argument("--progress-every", type=int, default=25, help="每采集多少只股票打印一次进度")
     collect.set_defaults(func=cmd_collect)
 
     collect_stock_pool = subparsers.add_parser("collect-stock-pool", help="从 AKShare 获取 A 股股票池并写入 stock_basic")
     collect_stock_pool.add_argument("--limit", type=int, default=100, help="股票池数量")
     collect_stock_pool.add_argument("--show", type=int, default=10, help="显示前 N 行")
     collect_stock_pool.set_defaults(func=cmd_collect_stock_pool)
+
+    prune_market_data = subparsers.add_parser("prune-market-data", help="删除当前股票池之外的本地行情、特征、标签和训练集")
+    prune_market_data.set_defaults(func=cmd_prune_market_data)
 
     collect_calendar = subparsers.add_parser("collect-calendar", help="采集交易日历并入库")
     collect_calendar.add_argument("--start-date", help="开始日期，格式 YYYYMMDD")
@@ -478,6 +782,55 @@ def build_parser() -> argparse.ArgumentParser:
     analyze_factors_parser.add_argument("--min-stocks-per-date", type=int, help="每个交易日至少多少只股票才计算横截面 IC")
     analyze_factors_parser.set_defaults(func=cmd_analyze_factors)
 
+    backtest_factors = subparsers.add_parser("backtest-factors", help="按因子方向做单因子组合回测")
+    backtest_factors.add_argument("--adjust", default="qfq", choices=["", "qfq", "hfq"], help="复权类型")
+    backtest_factors.add_argument("--target", help="目标标签，例如 future_return_5d")
+    backtest_factors.add_argument("--quantile", type=float, help="每次选取得分最高的比例，例如 0.2")
+    backtest_factors.add_argument("--top-n", type=int, help="每次固定选择前 N 只股票；设置后优先于 quantile")
+    backtest_factors.add_argument("--rebalance-step", type=int, help="每隔多少个交易日调仓一次")
+    backtest_factors.add_argument("--min-stocks-per-date", type=int, help="每个调仓日至少多少只可选股票")
+    backtest_factors.add_argument("--cost-rate", type=float, help="单次买入再卖出的估算总成本率")
+    backtest_factors.set_defaults(func=cmd_backtest_factors)
+
+    backtest_multifactor = subparsers.add_parser("backtest-multifactor", help="按训练集因子方向做多因子组合回测")
+    backtest_multifactor.add_argument("--adjust", default="qfq", choices=["", "qfq", "hfq"], help="复权类型")
+    backtest_multifactor.add_argument("--target", help="目标标签，例如 future_return_5d")
+    backtest_multifactor.add_argument("--quantile", type=float, help="每次选取得分最高的比例，例如 0.2")
+    backtest_multifactor.add_argument("--top-n", type=int, help="每次固定选择前 N 只股票；设置后优先于 quantile")
+    backtest_multifactor.add_argument("--rebalance-step", type=int, help="每隔多少个交易日调仓一次")
+    backtest_multifactor.add_argument("--min-stocks-per-date", type=int, help="每个调仓日至少多少只可选股票")
+    backtest_multifactor.add_argument("--cost-rate", type=float, help="单次买入再卖出的估算总成本率")
+    backtest_multifactor.add_argument("--max-factors", type=int, help="最多使用 Rank IC 靠前的多少个因子")
+    backtest_multifactor.add_argument("--min-abs-rank-ic", type=float, help="因子入选所需的最小绝对 Rank IC")
+    backtest_multifactor.add_argument("--evaluation-split", choices=["train", "valid", "test", "valid_test", "all"], help="评估区间")
+    backtest_multifactor.add_argument("--weighting", choices=["rank_ic", "equal"], help="因子权重方式")
+    backtest_multifactor.set_defaults(func=cmd_backtest_multifactor)
+
+    rolling_multifactor = subparsers.add_parser("rolling-backtest-multifactor", help="滚动多因子样本外回测")
+    rolling_multifactor.add_argument("--adjust", default="qfq", choices=["", "qfq", "hfq"], help="复权类型")
+    rolling_multifactor.add_argument("--target", help="目标标签，例如 future_return_5d")
+    rolling_multifactor.add_argument("--quantile", type=float, help="每次选取得分最高的比例，例如 0.2")
+    rolling_multifactor.add_argument("--top-n", type=int, help="每次固定选择前 N 只股票；设置后优先于 quantile")
+    rolling_multifactor.add_argument("--rebalance-step", type=int, help="每隔多少个交易日调仓一次")
+    rolling_multifactor.add_argument("--min-stocks-per-date", type=int, help="每个调仓日至少多少只可选股票")
+    rolling_multifactor.add_argument("--cost-rate", type=float, help="单次买入再卖出的估算总成本率")
+    rolling_multifactor.add_argument("--max-factors", type=int, help="最多使用 Rank IC 靠前的多少个因子")
+    rolling_multifactor.add_argument("--min-abs-rank-ic", type=float, help="因子入选所需的最小绝对 Rank IC")
+    rolling_multifactor.add_argument("--weighting", choices=["rank_ic", "equal"], help="因子权重方式")
+    rolling_multifactor.add_argument("--train-window", type=int, help="训练窗口交易日数量")
+    rolling_multifactor.add_argument("--test-window", type=int, help="测试窗口交易日数量")
+    rolling_multifactor.add_argument("--step", type=int, help="滚动步长交易日数量")
+    rolling_multifactor.add_argument("--embargo-days", type=int, help="训练窗口和测试窗口之间空出多少个交易日，降低标签穿越")
+    rolling_multifactor.add_argument("--min-train-rows", type=int, help="每折最少训练样本数")
+    rolling_multifactor.set_defaults(func=cmd_rolling_backtest_multifactor)
+
+    run_research = subparsers.add_parser("run-research", help="重建训练集并一键运行当前所有研究报告")
+    run_research.add_argument("--adjust", default="qfq", choices=["", "qfq", "hfq"], help="复权类型")
+    run_research.add_argument("--target", help="目标标签，例如 future_return_5d")
+    run_research.add_argument("--rebuild-dataset", action=argparse.BooleanOptionalAction, default=True, help="是否先重建衍生数据集")
+    run_research.add_argument("--skip-lgbm", action="store_true", help="跳过 LightGBM 训练和滚动验证")
+    run_research.set_defaults(func=cmd_run_research)
+
     train_baseline = subparsers.add_parser("train-baseline", help="训练和比较简单 baseline 模型")
     train_baseline.add_argument("--adjust", default="qfq", choices=["", "qfq", "hfq"], help="复权类型")
     train_baseline.add_argument("--target", help="目标标签，例如 future_return_5d")
@@ -519,7 +872,7 @@ def build_parser() -> argparse.ArgumentParser:
     query_training_dataset.set_defaults(func=cmd_query_training_dataset)
 
     report_summary = subparsers.add_parser("report-summary", help="查看本地 artifacts/reports 里的报告摘要")
-    report_summary.add_argument("--type", choices=["lgbm", "baseline", "rolling_lgbm", "factor_analysis", "unknown"], help="只查看某类报告")
+    report_summary.add_argument("--type", choices=["lgbm", "baseline", "rolling_lgbm", "factor_analysis", "factor_backtest", "multifactor_backtest", "rolling_multifactor_backtest", "unknown"], help="只查看某类报告")
     report_summary.add_argument("--limit", type=int, default=3, help="显示最近 N 个报告")
     report_summary.set_defaults(func=cmd_report_summary)
 

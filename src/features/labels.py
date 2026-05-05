@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import numpy as np
 import pandas as pd
 
 
@@ -31,9 +32,10 @@ def build_training_labels(daily_prices: pd.DataFrame, adjust: str = "qfq") -> pd
     for _, group in data.groupby("symbol", sort=False):
         label = group[["symbol", "ts_code", "trade_date", "close"]].copy()
         close = label["close"].astype(float)
-        label["future_return_1d"] = close.shift(-1) / close - 1
-        label["future_return_5d"] = close.shift(-5) / close - 1
-        label["future_return_20d"] = close.shift(-20) / close - 1
+        safe_close = close.mask(close <= 0)
+        label["future_return_1d"] = close.shift(-1) / safe_close - 1
+        label["future_return_5d"] = close.shift(-5) / safe_close - 1
+        label["future_return_20d"] = close.shift(-20) / safe_close - 1
         label["future_max_drawdown_5d"] = _future_max_drawdown(close, 5).to_numpy()
         label["future_max_drawdown_20d"] = _future_max_drawdown(close, 20).to_numpy()
         label["label_up_5d"] = (label["future_return_5d"] > 0).where(label["future_return_5d"].notna(), pd.NA)
@@ -44,6 +46,14 @@ def build_training_labels(daily_prices: pd.DataFrame, adjust: str = "qfq") -> pd
     result["adjust"] = adjust
     result["updated_at"] = now
     result["trade_date"] = result["trade_date"].dt.date
+    label_columns = [
+        "future_return_1d",
+        "future_return_5d",
+        "future_return_20d",
+        "future_max_drawdown_5d",
+        "future_max_drawdown_20d",
+    ]
+    result[label_columns] = result[label_columns].replace([np.inf, -np.inf], pd.NA)
     return result[columns]
 
 
@@ -52,7 +62,7 @@ def _future_max_drawdown(close: pd.Series, window: int) -> pd.Series:
     close = close.reset_index(drop=True)
     for index, current in close.items():
         future = close.iloc[index + 1 : index + window + 1]
-        if future.empty or pd.isna(current):
+        if future.empty or pd.isna(current) or current <= 0:
             values.append(pd.NA)
             continue
         values.append((future.min() / current) - 1)

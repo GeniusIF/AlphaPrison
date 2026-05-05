@@ -148,12 +148,24 @@ with tab_model:
             cols[1].metric("整体方向准确率", f"{aggregate.get('directional_accuracy', 0):.2%}")
             cols[2].metric("折数", len(payload.get("folds", [])))
             st.dataframe(tables.get("folds"), use_container_width=True, hide_index=True)
+        elif report["type"] == "rolling_multifactor_backtest":
+            st.subheader("滚动多因子样本外回测")
+            aggregate_summary = payload.get("aggregate_summary", {})
+            cols = st.columns(4)
+            cols[0].metric("累计收益", f"{aggregate_summary.get('cumulative_return', 0):.2%}")
+            cols[1].metric("超额收益", f"{aggregate_summary.get('excess_cumulative_return', 0):.2%}")
+            cols[2].metric("最大回撤", f"{aggregate_summary.get('max_drawdown', 0):.2%}")
+            cols[3].metric("折数", payload.get("fold_count", 0))
+            st.dataframe(tables.get("folds"), use_container_width=True, hide_index=True)
         elif report["type"] == "factor_analysis":
             st.subheader("因子 Rank IC")
             top_rank_ic = tables.get("top_rank_ic")
             display_columns = [
                 "feature",
                 "daily_rank_ic_mean",
+                "daily_rank_ic_ir",
+                "factor_direction",
+                "recommended_transform",
                 "daily_rank_ic_positive_rate",
                 "daily_count",
                 "daily_coverage",
@@ -162,6 +174,51 @@ with tab_model:
             if top_rank_ic is not None and not top_rank_ic.empty:
                 st.dataframe(
                     top_rank_ic[[column for column in display_columns if column in top_rank_ic.columns]],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+        elif report["type"] == "factor_backtest":
+            st.subheader("单因子组合回测")
+            top_factors = tables.get("top_factors")
+            display_columns = [
+                "feature",
+                "factor_direction",
+                "daily_rank_ic_mean",
+                "cumulative_return",
+                "annualized_return",
+                "max_drawdown",
+                "win_rate",
+                "periods",
+            ]
+            if top_factors is not None and not top_factors.empty:
+                st.dataframe(
+                    top_factors[[column for column in display_columns if column in top_factors.columns]],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+        elif report["type"] == "multifactor_backtest":
+            st.subheader("多因子组合回测")
+            summary = tables.get("summary")
+            if summary is not None and not summary.empty:
+                score = summary.iloc[0]
+                cols = st.columns(4)
+                cols[0].metric("累计收益", f"{score.get('cumulative_return', 0):.2%}")
+                cols[1].metric("超额收益", f"{score.get('excess_cumulative_return', 0):.2%}")
+                cols[2].metric("最大回撤", f"{score.get('max_drawdown', 0):.2%}")
+                cols[3].metric("胜率", f"{score.get('win_rate', 0):.2%}")
+            st.subheader("入选因子")
+            selected_factors = tables.get("selected_factors")
+            display_columns = [
+                "feature",
+                "factor_direction",
+                "daily_rank_ic_mean",
+                "daily_rank_ic_ir",
+                "abs_daily_rank_ic_mean",
+                "daily_count",
+            ]
+            if selected_factors is not None and not selected_factors.empty:
+                st.dataframe(
+                    selected_factors[[column for column in display_columns if column in selected_factors.columns]],
                     use_container_width=True,
                     hide_index=True,
                 )

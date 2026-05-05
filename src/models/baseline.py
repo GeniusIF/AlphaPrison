@@ -12,6 +12,7 @@ from sklearn.linear_model import LinearRegression, Ridge
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
+from src.models.cleaning import clean_training_frame
 from src.models.dataset import FEATURE_COLUMNS
 from src.models.train_lgbm import score_predictions, split_date_range
 from src.utils.config import project_path
@@ -29,9 +30,10 @@ def train_baseline_models(
         if split not in set(dataset["dataset_split"]):
             raise ValueError(f"Training dataset has no {split} split")
 
-    train = dataset[dataset["dataset_split"] == "train"].copy()
-    valid = dataset[dataset["dataset_split"] == "valid"].copy()
-    test = dataset[dataset["dataset_split"] == "test"].copy()
+    clean_dataset = clean_training_frame(dataset, target=target).dropna(subset=[target]).copy()
+    train = clean_dataset[clean_dataset["dataset_split"] == "train"].copy()
+    valid = clean_dataset[clean_dataset["dataset_split"] == "valid"].copy()
+    test = clean_dataset[clean_dataset["dataset_split"] == "test"].copy()
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir = project_path(report_dir)
@@ -93,7 +95,7 @@ def predict_zero(splits: list[pd.DataFrame]) -> dict[str, np.ndarray]:
 
 def predict_feature(splits: list[pd.DataFrame], feature: str) -> dict[str, np.ndarray]:
     return {
-        split_name: split[feature].fillna(0).to_numpy(dtype=float)
+        split_name: split[feature].replace([np.inf, -np.inf], np.nan).fillna(0).to_numpy(dtype=float)
         for split_name, split in zip(["train", "valid", "test"], splits)
     }
 

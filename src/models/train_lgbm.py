@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
+from src.models.cleaning import clean_training_frame
 from src.models.dataset import FEATURE_COLUMNS
 from src.utils.config import project_path
 
@@ -27,9 +28,10 @@ def train_lgbm_regressor(
         if split not in set(dataset["dataset_split"]):
             raise ValueError(f"Training dataset has no {split} split")
 
-    train = dataset[dataset["dataset_split"] == "train"].copy()
-    valid = dataset[dataset["dataset_split"] == "valid"].copy()
-    test = dataset[dataset["dataset_split"] == "test"].copy()
+    clean_dataset = clean_training_frame(dataset, target=target).dropna(subset=[target]).copy()
+    train = clean_dataset[clean_dataset["dataset_split"] == "train"].copy()
+    valid = clean_dataset[clean_dataset["dataset_split"] == "valid"].copy()
+    test = clean_dataset[clean_dataset["dataset_split"] == "test"].copy()
 
     params = dict(model_config)
     params.setdefault("objective", "regression")
@@ -73,7 +75,7 @@ def train_lgbm_regressor(
         },
     }
 
-    predictions = build_predictions_frame(model, dataset, target)
+    predictions = build_predictions_frame(model, clean_dataset, target)
     importance = pd.DataFrame(
         {
             "feature": FEATURE_COLUMNS,

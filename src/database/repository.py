@@ -7,10 +7,22 @@ import pandas as pd
 
 from src.database.schema import SCHEMA_SQL
 from src.features.labels import build_training_labels
-from src.features.technical import build_technical_features
-from src.models.dataset import build_model_training_dataset
+from src.features.technical import TECHNICAL_FEATURE_TABLE_COLUMNS, build_technical_features
+from src.models.dataset import DATASET_COLUMNS, build_model_training_dataset
 from src.utils.config import project_path
 from src.utils.stocks import normalize_symbol
+
+
+LIQUIDITY_FEATURE_COLUMNS = {
+    "amount_ma_5": "DOUBLE",
+    "amount_ma_20": "DOUBLE",
+    "amount_ratio_5": "DOUBLE",
+    "turnover_rate": "DOUBLE",
+    "turnover_ma_5": "DOUBLE",
+    "turnover_ma_20": "DOUBLE",
+    "turnover_ratio_5": "DOUBLE",
+    "amplitude": "DOUBLE",
+}
 
 
 class MarketDataRepository:
@@ -24,6 +36,7 @@ class MarketDataRepository:
     def init_schema(self) -> None:
         with self.connect() as conn:
             conn.execute(SCHEMA_SQL)
+            self._ensure_schema_extensions(conn)
 
     def upsert_stock_basic(self, stock_basic: pd.DataFrame) -> int:
         if stock_basic.empty:
@@ -46,6 +59,49 @@ class MarketDataRepository:
             )
             conn.unregister("stock_basic_frame")
         return len(symbols)
+
+    def replace_stock_basic_source(self, stock_basic: pd.DataFrame, source: str) -> int:
+        self.init_schema()
+        with self.connect() as conn:
+            conn.execute("DELETE FROM stock_basic WHERE source = ?", [source])
+        return self.upsert_stock_basic(stock_basic)
+
+    def replace_stock_basic(self, stock_basic: pd.DataFrame) -> int:
+        self.init_schema()
+        with self.connect() as conn:
+            conn.execute("DELETE FROM stock_basic")
+        return self.upsert_stock_basic(stock_basic)
+
+    def prune_market_data_to_stock_basic(self) -> pd.DataFrame:
+        self.init_schema()
+        symbol_tables = [
+            "daily_price",
+            "stock_suspension",
+            "daily_limit_status",
+            "technical_features",
+            "training_labels",
+            "model_training_dataset",
+        ]
+        rows = []
+        with self.connect() as conn:
+            for table_name in symbol_tables:
+                before = conn.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
+                conn.execute(
+                    f"""
+                    DELETE FROM {table_name}
+                    WHERE symbol NOT IN (SELECT symbol FROM stock_basic)
+                    """
+                )
+                after = conn.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
+                rows.append(
+                    {
+                        "table": table_name,
+                        "before": int(before),
+                        "after": int(after),
+                        "deleted": int(before - after),
+                    }
+                )
+        return pd.DataFrame(rows)
 
     def upsert_daily_prices(self, daily_prices: pd.DataFrame) -> int:
         if daily_prices.empty:
@@ -186,9 +242,10 @@ class MarketDataRepository:
                 """
             )
             conn.execute(
-                """
-                INSERT INTO technical_features
-                SELECT * FROM technical_features_frame
+                f"""
+                INSERT INTO technical_features ({", ".join(TECHNICAL_FEATURE_TABLE_COLUMNS)})
+                SELECT {", ".join(TECHNICAL_FEATURE_TABLE_COLUMNS)}
+                FROM technical_features_frame
                 """
             )
             conn.unregister("technical_features_frame")
@@ -240,13 +297,24 @@ class MarketDataRepository:
                 """
             )
             conn.execute(
-                """
-                INSERT INTO model_training_dataset
-                SELECT * FROM model_training_dataset_frame
+                f"""
+                INSERT INTO model_training_dataset ({", ".join(DATASET_COLUMNS)})
+                SELECT {", ".join(DATASET_COLUMNS)}
+                FROM model_training_dataset_frame
                 """
             )
             conn.unregister("model_training_dataset_frame")
         return len(frame)
+
+    def _ensure_schema_extensions(self, conn: duckdb.DuckDBPyConnection) -> None:
+        for table_name in ["technical_features", "model_training_dataset"]:
+            existing_columns = {
+                str(row[1])
+                for row in conn.execute(f"PRAGMA table_info('{table_name}')").fetchall()
+            }
+            for column_name, column_type in LIQUIDITY_FEATURE_COLUMNS.items():
+                if column_name not in existing_columns:
+                    conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
 
     def list_stocks(self) -> pd.DataFrame:
         if not self.db_path.exists():

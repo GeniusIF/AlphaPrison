@@ -21,6 +21,27 @@ factor_analysis:
   quantiles: 5
   min_stocks_per_date: 5
 
+factor_backtest:
+  quantile: 0.2
+  top_n:
+  rebalance_step: 5
+
+multifactor_backtest:
+  quantile: 0.2
+  top_n:
+  rebalance_step: 5
+  max_factors: 5
+  min_abs_rank_ic: 0.02
+  evaluation_split: test
+  weighting: rank_ic
+
+rolling_multifactor_backtest:
+  train_window: 252
+  test_window: 63
+  step: 63
+  embargo_days: 5
+  min_train_rows: 200
+
 baseline:
   ridge_alpha: 1.0
 

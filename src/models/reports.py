@@ -36,6 +36,8 @@ def list_json_reports(report_dir: str | Path) -> list[dict[str, Any]]:
 
 
 def infer_report_type(payload: dict[str, Any], filename: str = "") -> str:
+    if "aggregate_summary" in payload and "folds" in payload or filename.startswith("rolling_multifactor_backtest_"):
+        return "rolling_multifactor_backtest"
     if "aggregate_scores" in payload and "folds" in payload:
         return "rolling_lgbm"
     if "models" in payload:
@@ -44,6 +46,10 @@ def infer_report_type(payload: dict[str, Any], filename: str = "") -> str:
         return "lgbm"
     if "top_rank_ic" in payload or filename.startswith("factor_analysis_"):
         return "factor_analysis"
+    if "top_factors" in payload or filename.startswith("single_factor_backtest_"):
+        return "factor_backtest"
+    if ("selected_factors" in payload and "summary" in payload) or filename.startswith("multifactor_backtest_"):
+        return "multifactor_backtest"
     return "unknown"
 
 
@@ -66,8 +72,20 @@ def report_summary_tables(report: dict[str, Any]) -> dict[str, pd.DataFrame]:
             "aggregate_scores": score_table({"aggregate": payload.get("aggregate_scores", {})}),
             "folds": rolling_fold_table(payload.get("folds", [])),
         }
+    if report_type == "rolling_multifactor_backtest":
+        return {
+            "aggregate_summary": pd.DataFrame([payload.get("aggregate_summary", {})]),
+            "folds": rolling_multifactor_fold_table(payload.get("folds", [])),
+        }
     if report_type == "factor_analysis":
         return {"top_rank_ic": pd.DataFrame(payload.get("top_rank_ic", []))}
+    if report_type == "factor_backtest":
+        return {"top_factors": pd.DataFrame(payload.get("top_factors", []))}
+    if report_type == "multifactor_backtest":
+        return {
+            "summary": pd.DataFrame([payload.get("summary", {})]),
+            "selected_factors": pd.DataFrame(payload.get("selected_factors", [])),
+        }
     return {}
 
 
@@ -105,6 +123,32 @@ def rolling_fold_table(folds: list[dict[str, Any]]) -> pd.DataFrame:
                 "rmse": score.get("rmse"),
                 "r2": score.get("r2"),
                 "directional_accuracy": score.get("directional_accuracy"),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def rolling_multifactor_fold_table(folds: list[dict[str, Any]]) -> pd.DataFrame:
+    rows = []
+    for fold in folds:
+        summary = fold.get("summary", {})
+        rows.append(
+            {
+                "fold": fold.get("fold"),
+                "train_start": fold.get("train_date_range", {}).get("start"),
+                "train_end": fold.get("train_date_range", {}).get("end"),
+                "test_start": fold.get("test_date_range", {}).get("start"),
+                "test_end": fold.get("test_date_range", {}).get("end"),
+                "train_rows": fold.get("train_rows"),
+                "test_rows": fold.get("test_rows"),
+                "selected_features": ",".join(fold.get("selected_features", [])),
+                "periods": summary.get("periods"),
+                "cumulative_return": summary.get("cumulative_return"),
+                "benchmark_cumulative_return": summary.get("benchmark_cumulative_return"),
+                "excess_cumulative_return": summary.get("excess_cumulative_return"),
+                "max_drawdown": summary.get("max_drawdown"),
+                "win_rate": summary.get("win_rate"),
+                "excess_win_rate": summary.get("excess_win_rate"),
             }
         )
     return pd.DataFrame(rows)

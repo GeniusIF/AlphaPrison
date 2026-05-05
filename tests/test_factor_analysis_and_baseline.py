@@ -1,4 +1,5 @@
 import pandas as pd
+import numpy as np
 
 from src.models.baseline import train_baseline_models
 from src.models.factor_analysis import build_factor_summary, build_quantile_returns
@@ -35,6 +36,8 @@ def test_build_factor_summary() -> None:
     top_feature = summary.iloc[0]["feature"]
     assert top_feature == "return_5d"
     assert summary.iloc[0]["daily_count"] == 6
+    assert summary.iloc[0]["factor_direction"] == "positive"
+    assert summary.iloc[0]["recommended_transform"] == "raw_or_rank_descending"
 
 
 def test_build_quantile_returns() -> None:
@@ -43,6 +46,20 @@ def test_build_quantile_returns() -> None:
     return_5d = quantiles[quantiles["feature"] == "return_5d"]
     assert len(return_5d) == 3
     assert return_5d["top_minus_bottom"].iloc[0] > 0
+    assert return_5d["best_minus_worst"].iloc[0] > 0
+
+
+def test_build_quantile_returns_respects_negative_direction() -> None:
+    quantiles = build_quantile_returns(
+        sample_model_dataset(),
+        target="future_return_5d",
+        quantiles=3,
+        direction_by_feature={"return_5d": "negative"},
+    )
+
+    return_5d = quantiles[quantiles["feature"] == "return_5d"]
+    assert return_5d["top_minus_bottom"].iloc[0] > 0
+    assert return_5d["best_minus_worst"].iloc[0] < 0
 
 
 def test_train_baseline_models(tmp_path) -> None:
@@ -55,3 +72,18 @@ def test_train_baseline_models(tmp_path) -> None:
     assert "ridge" in metrics["models"]
     assert "test" in metrics["models"]["ridge"]
     assert metrics["rows"]["train"] == 18
+
+
+def test_train_baseline_models_handles_infinite_features(tmp_path) -> None:
+    dataset = sample_model_dataset()
+    dataset.loc[0, "amount_ratio_5"] = np.inf
+    dataset.loc[1, "turnover_ratio_5"] = -np.inf
+
+    metrics = train_baseline_models(
+        dataset=dataset,
+        target="future_return_5d",
+        report_dir=tmp_path,
+    )
+
+    assert "linear_regression" in metrics["models"]
+    assert "ridge" in metrics["models"]

@@ -8,6 +8,7 @@ from typing import Any
 import lightgbm as lgb
 import pandas as pd
 
+from src.models.cleaning import clean_training_frame
 from src.models.dataset import FEATURE_COLUMNS
 from src.models.train_lgbm import score_predictions, split_date_range
 from src.utils.config import project_path
@@ -25,7 +26,7 @@ def rolling_validate_lgbm(
 ) -> dict[str, Any]:
     if dataset.empty:
         raise ValueError("Training dataset is empty. Run build-training-dataset first.")
-    frame = dataset.dropna(subset=[target]).copy()
+    frame = clean_training_frame(dataset, target=target).dropna(subset=[target]).copy()
     frame["trade_date"] = pd.to_datetime(frame["trade_date"]).dt.date
     dates = sorted(frame["trade_date"].unique())
     folds = build_rolling_folds(dates, train_window=train_window, test_window=test_window, step=step)

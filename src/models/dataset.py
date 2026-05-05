@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import numpy as np
 import pandas as pd
 
 
@@ -21,6 +22,14 @@ FEATURE_COLUMNS = [
     "volume_ma_5",
     "volume_ma_20",
     "volume_ratio_5",
+    "amount_ma_5",
+    "amount_ma_20",
+    "amount_ratio_5",
+    "turnover_rate",
+    "turnover_ma_5",
+    "turnover_ma_20",
+    "turnover_ratio_5",
+    "amplitude",
     "rsi_14",
     "macd",
     "macd_signal",
@@ -78,6 +87,10 @@ def build_model_training_dataset(
     )
     dataset = add_limit_status(dataset, limit_status)
     dataset = add_suspension_status(dataset, suspensions)
+    for column in FEATURE_COLUMNS:
+        if column not in dataset.columns:
+            dataset[column] = pd.NA
+    dataset[FEATURE_COLUMNS] = dataset[FEATURE_COLUMNS].replace([np.inf, -np.inf], pd.NA)
     dataset = dataset.dropna(subset=[target]).copy()
     dataset = assign_time_splits(dataset, train_ratio=train_ratio, valid_ratio=valid_ratio)
     dataset["updated_at"] = datetime.now(timezone.utc).replace(tzinfo=None)
